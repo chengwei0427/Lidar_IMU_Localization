@@ -1,9 +1,11 @@
-cmake_minimum_required(VERSION 2.8.3)
-project(GC_LOAM)
+cmake_minimum_required(VERSION 3.2)
+project(LIO_Localization)
 
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS "-std=c++11")
 # set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g -pthread")
+
+add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
 
 find_package(catkin REQUIRED COMPONENTS
   	     message_generation
@@ -14,29 +16,21 @@ find_package(catkin REQUIRED COMPONENTS
   	     rospy
   	     std_msgs
   	     tf
-  	     tf_conversions
-  	     rosbag
-  	     #livox_ros_driver
   	     eigen_conversions
-  	     pcl_conversions
-  	     pcl_ros
-  	     message_filters
-  	     std_srvs)
+)
 
 find_package(Eigen3 REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(PCL REQUIRED QUIET)
 find_package(OpenCV REQUIRED QUIET)
+find_package(Ceres REQUIRED PATHS /home/cc/workspace/3rdparty/ceres_1.14)
 # add third part conf
 set(3RDPARTY_DIR ${PROJECT_SOURCE_DIR}/../../../workspace/3rdparty)
 
-# # find_package(Ceres REQUIRED PATHS /home/cc/workspace/3rdparty/ceres-1.14)
-# set(CERES_INCLUDE_DIRS ${3RDPARTY_DIR}/ceres-1.14/include)
-# set(CERES_LIBRARY_DIRS ${3RDPARTY_DIR}/ceres-1.14/lib)
-# file(GLOB CERES_LIBRARIES ${CERES_LIBRARY_DIRS}/*.a ${CERES_LIBRARY_DIRS}/*.so*)
+set(GTSAM_INCLUDE_DIR /home/cc/workspace/3rdparty/gtsam4.2a0/include)
+set(GTSAM_LIBRARY_DIRS /home/cc/workspace/3rdparty/gtsam4.2a0/lib)
+file(GLOB GTSAM_LIBRARIES ${GTSAM_LIBRARY_DIRS}/*.a ${GTSAM_LIBRARY_DIRS}/*.so*)
 
-find_package(Ceres REQUIRED)
-# find_package(SuiteSparse REQUIRED)
 
 message(STATUS "Using catkin version ${catkin_VERSION}")
 message(STATUS "Using Ceres version ${CERES_VERSION}")
@@ -47,11 +41,6 @@ add_message_files(
   cloud_info.msg
 )
 
-add_service_files(
-  DIRECTORY srv
-  FILES
-  save_map.srv
-)
 
 generate_messages(
   DEPENDENCIES

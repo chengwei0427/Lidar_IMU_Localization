@@ -1,17 +1,17 @@
 <?xml version="1.0"?>
 <package>
-  <name>lio_livox</name>
+  <name>LIO_Localization</name>
   <version>0.0.0</version>
 
   <description>
-    LIO-Livox
+    LIO_Localization
   </description>
 
-  <maintainer email="dev@livoxtech.com">livox</maintainer>
+  <maintainer email="dev@livoxtech.com">gc</maintainer>
 
   <license>BSD</license>
 
-  <author email="dev@livoxtech.com">livox</author>
+  <author email="dev@livoxtech.com">gc</author>
   
   <buildtool_depend>catkin</buildtool_depend>
   <build_depend>message_generation</build_depend>
@@ -29,6 +29,10 @@
   <build_depend>pcl_ros</build_depend>
   <build_depend>message_filters</build_depend>
   <build_depend>std_srvs</build_depend>
+  <build_depend>message_generation</build_depend>
+  <build_depend>message_runtime</build_depend>
+  <build_depend>visualization_msgs</build_depend>
+
 
   <run_depend>message_runtime</run_depend>
   <run_depend>geometry_msgs</run_depend>
@@ -45,6 +49,9 @@
   <run_depend>pcl_ros</run_depend>
   <run_depend>message_filters</run_depend>
   <run_depend>std_srvs</run_depend>
+  <run_depend>message_generation</run_depend>
+  <run_depend>message_runtime</run_depend>
+    <run_depend>visualization_msgs</run_depend>
 
   <test_depend>rostest</test_depend>
   <test_depend>rosbag</test_depend>

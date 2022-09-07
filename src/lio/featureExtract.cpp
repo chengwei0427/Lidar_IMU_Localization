@@ -25,7 +25,7 @@
 #include <mutex>
 #include <chrono>
 
-#include "cloud_info.h"
+#include "LIO_Localization/cloud_info.h"
 #include "my_utility.h"
 
 using namespace std;
@@ -88,7 +88,7 @@ public:
 
     pcl::VoxelGrid<PointType> downSizeFilter;
 
-    GC_LOAM::cloud_info cloudInfo;
+    LIO_Localization::cloud_info cloudInfo;
     double timeScanCur;
     double timeScanEnd;
     cv::Mat rangeMat;
@@ -160,7 +160,7 @@ public:
         pubCornerPoints = nh.advertise<sensor_msgs::PointCloud2>("/laser_cloud_edge", 1);
         pubSurfacePoints = nh.advertise<sensor_msgs::PointCloud2>("/laser_cloud_surf", 1);
         pubFullPoints = nh.advertise<sensor_msgs::PointCloud2>("/laser_cloud_filtered", 10);
-        pubLaserCloudInfo = nh.advertise<GC_LOAM::cloud_info>("/feature/cloud_info", 1);
+        pubLaserCloudInfo = nh.advertise<LIO_Localization::cloud_info>("/feature/cloud_info", 1);
 
         allocateMemory();
         resetParameters();
