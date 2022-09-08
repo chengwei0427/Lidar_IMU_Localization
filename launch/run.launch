@@ -1,5 +1,5 @@
 <launch>
-
+    <param name="use_sim_time" value="true" />
     <arg name="project" default="LIO_Localization"/>
     
     <node pkg="tf" type="static_transform_publisher" name="base_link_joint" args="0 0 0 0 0 0 base_link chassis_link 100" />
@@ -14,16 +14,6 @@
     <node pkg="$(arg project)" type="$(arg project)_featureExtract"   name="$(arg project)_featureExtract"    output="screen" 	respawn="true"/>
 
     <node pkg="$(arg project)" type="$(arg project)_poseEstimate"   name="$(arg project)_poseEstimate"    output="screen">
-        <!-- 0-Not Use IMU, 1-Use IMU remove Rotation Distort, 2-Tightly Coupled IMU -->
-        <param name="IMU_Mode" type="int" value="0" />
-        <!-- Voxel Filter Size Use to Downsize Map Cloud -->
-        <param name="filter_parameter_corner" type="double" value="0.2" />
-        <param name="filter_parameter_surf" type="double" value="0.4" />
-        <!-- Extrinsic Parameter between Lidar & IMU -->
-        <rosparam param="Extrinsic_Tlb"> [1.0, 0.0, 0.0, -0.0,
-                                          0.0, 1.0, 0.0, -0.0,
-                                          0.0, 0.0, 1.0,  0.0,
-                                          0.0, 0.0, 0.0,  1.0]</rosparam>
     </node>
 
     <!--- Run Rviz-->

@@ -1001,7 +1001,7 @@ void Estimator::Estimate(std::list<LidarFrame> &lidarFrameList,
   Eigen::Vector3d exPbl = -1.0 * exRbl * exTlb.topRightCorner(3, 1);
   kdtreeCornerFromLocal->setInputCloud(laserCloudCornerFromLocal);
   kdtreeSurfFromLocal->setInputCloud(laserCloudSurfFromLocal);
-  kdtreeNonFeatureFromLocal->setInputCloud(laserCloudNonFeatureFromLocal);
+  // kdtreeNonFeatureFromLocal->setInputCloud(laserCloudNonFeatureFromLocal);
 
   std::unique_lock<std::mutex> locker3(map_manager->mtx_MapManager);
   for (int i = 0; i < 4851; i++)
@@ -1139,18 +1139,18 @@ void Estimator::Estimate(std::list<LidarFrame> &lidarFrameList,
                                std::ref(exTlb),
                                std::ref(transformTobeMapped));
 
-      threads[2] = std::thread(&Estimator::processNonFeatureICP, this,
-                               std::ref(edgesNon[f]),
-                               std::ref(vNonFeatures[f]),
-                               std::ref(laserCloudNonFeatureStack[f]),
-                               std::ref(laserCloudNonFeatureFromLocal),
-                               std::ref(kdtreeNonFeatureFromLocal),
-                               std::ref(exTlb),
-                               std::ref(transformTobeMapped));
+      // threads[2] = std::thread(&Estimator::processNonFeatureICP, this,
+      //                          std::ref(edgesNon[f]),
+      //                          std::ref(vNonFeatures[f]),
+      //                          std::ref(laserCloudNonFeatureStack[f]),
+      //                          std::ref(laserCloudNonFeatureFromLocal),
+      //                          std::ref(kdtreeNonFeatureFromLocal),
+      //                          std::ref(exTlb),
+      //                          std::ref(transformTobeMapped));
 
       threads[0].join();
       threads[1].join();
-      threads[2].join();
+      // threads[2].join();
     }
 
     int cntSurf = 0;
@@ -1389,18 +1389,18 @@ void Estimator::Estimate(std::list<LidarFrame> &lidarFrameList,
                                std::ref(exTlb),
                                std::ref(transformTobeMapped));
 
-      threads[2] = std::thread(&Estimator::processNonFeatureICP, this,
-                               std::ref(edgesNon[f]),
-                               std::ref(vNonFeatures[f]),
-                               std::ref(laserCloudNonFeatureStack[f]),
-                               std::ref(laserCloudNonFeatureFromLocal),
-                               std::ref(kdtreeNonFeatureFromLocal),
-                               std::ref(exTlb),
-                               std::ref(transformTobeMapped));
+      // threads[2] = std::thread(&Estimator::processNonFeatureICP, this,
+      //                          std::ref(edgesNon[f]),
+      //                          std::ref(vNonFeatures[f]),
+      //                          std::ref(laserCloudNonFeatureStack[f]),
+      //                          std::ref(laserCloudNonFeatureFromLocal),
+      //                          std::ref(kdtreeNonFeatureFromLocal),
+      //                          std::ref(exTlb),
+      //                          std::ref(transformTobeMapped));
 
       threads[0].join();
       threads[1].join();
-      threads[2].join();
+      // threads[2].join();
       int cntFtu = 0;
       for (auto &e : edgesLine[f])
       {

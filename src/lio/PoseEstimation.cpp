@@ -33,6 +33,8 @@ sensor_msgs::NavSatFix gps;
 int pushCount = 0;
 double startTime = 0;
 
+std::string root_dir = ROOT_DIR;
+
 nav_msgs::Path laserOdoPath;
 
 /** \brief publish odometry infomation
@@ -57,7 +59,7 @@ void pubOdometry(const Eigen::Matrix4d &newPose, double &timefullCloud)
   laserOdometry.pose.pose.position.y = newPosition.y();
   laserOdometry.pose.pose.position.z = newPosition.z();
   pubLaserOdometry.publish(laserOdometry);
-  printf("1\n");
+
   geometry_msgs::PoseStamped laserPose;
   laserPose.header = laserOdometry.header;
   laserPose.pose = laserOdometry.pose.pose;
@@ -72,17 +74,6 @@ void pubOdometry(const Eigen::Matrix4d &newPose, double &timefullCloud)
   laserOdometryTrans.setRotation(tf::Quaternion(newQuat.x(), newQuat.y(), newQuat.z(), newQuat.w()));
   laserOdometryTrans.setOrigin(tf::Vector3(newPosition.x(), newPosition.y(), newPosition.z()));
   tfBroadcaster->sendTransform(laserOdometryTrans);
-
-  // gps.header.stamp = ros::Time().fromSec(timefullCloud);
-  // gps.header.frame_id = "world";
-  // gps.latitude = newPosition.x();
-  // gps.longitude = newPosition.y();
-  // gps.altitude = newPosition.z();
-  // gps.position_covariance = {
-  //     Rcurr(0, 0), Rcurr(1, 0), Rcurr(2, 0),
-  //     Rcurr(0, 1), Rcurr(1, 1), Rcurr(2, 1),
-  //     Rcurr(0, 2), Rcurr(1, 2), Rcurr(2, 2)};
-  // pubGps.publish(gps);
 }
 
 void fullCallBack(const sensor_msgs::PointCloud2ConstPtr &msg)
@@ -422,6 +413,10 @@ void process()
           countFail++;
           if (countFail > 100)
           {
+            if (_imuMsgQueue.empty())
+              std::cout << "imu queue is empty." << std::endl;
+            else
+              std::cout << "imu time: " << _imuMsgQueue.front()->header.stamp.toSec() << "-->" << _imuMsgQueue.back()->header.stamp.toSec() << std::endl;
             break;
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -529,11 +524,6 @@ void process()
       transformAftMapped.topRightCorner(3, 1) = lidar_list->front().P;
 
       // publish odometry rostopic
-      {
-        std::cout.precision(8);
-        std::cout << "t:" << transformTobeMapped << "\nstamp:" << time_curr_lidar << std::endl;
-        std::cout << lidar_list->front().timeStamp << std::endl;
-      }
       pubOdometry(transformTobeMapped, lidar_list->front().timeStamp);
 
       // publish lidar points
@@ -613,43 +603,60 @@ void process()
 int main(int argc, char **argv)
 {
   ros::init(argc, argv, "PoseEstimation");
-  ros::NodeHandle nodeHandler("~");
+  ros::NodeHandle nh;
+  ROS_INFO("\033[1;32m----> PoseEstimation Started.\033[0m");
 
-  ros::param::get("~filter_parameter_corner", filter_parameter_corner);
-  ros::param::get("~filter_parameter_surf", filter_parameter_surf);
-  ros::param::get("~IMU_Mode", IMU_Mode);
-  std::vector<double> vecTlb;
-  ros::param::get("~Extrinsic_Tlb", vecTlb);
+  std::cout << "ROOT_DIR: " << root_dir << std::endl;
+  //  create folder
+  std::string command = "mkdir -p " + root_dir + "Log";
+  system(command.c_str());
+
+  std::vector<double> extrinT(3, 0.0);
+  std::vector<double> extrinR(9, 0.0);
+  std::string imu_topic;
+
+  nh.param<std::string>("common/imuTopic", imu_topic, "/livox/imu");
+  nh.param<float>("mapping/filter_parameter_corner", filter_parameter_corner, 0.3);
+  nh.param<float>("mapping/filter_parameter_surf", filter_parameter_surf, 0.3);
+  nh.param<int>("mapping/IMU_Mode", IMU_Mode, 0);
+  nh.param<std::vector<double>>("mapping/extrinsic_T", extrinT, std::vector<double>());
+  nh.param<std::vector<double>>("mapping/extrinsic_R", extrinR, std::vector<double>());
 
   // set extrinsic matrix between lidar & IMU
-  Eigen::Matrix3d R;
-  Eigen::Vector3d t;
-  R << vecTlb[0], vecTlb[1], vecTlb[2],
-      vecTlb[4], vecTlb[5], vecTlb[6],
-      vecTlb[8], vecTlb[9], vecTlb[10];
-  t << vecTlb[3], vecTlb[7], vecTlb[11];
-  Eigen::Quaterniond qr(R);
-  R = qr.normalized().toRotationMatrix();
+  exRbl
+      << extrinR[0],
+      extrinR[1], extrinR[2],
+      extrinR[3], extrinR[4], extrinR[5],
+      extrinR[6], extrinR[7], extrinR[8];
+  exPbl << extrinT[0], extrinT[1], extrinT[2];
+
+  std::cout << "exRbl: \n"
+            << exRbl << std::endl;
+  std::cout << "exPbl: " << exPbl.transpose() << std::endl;
+
+  Eigen::Quaterniond qr(exRbl); //  归一化处理
+  exRbl = qr.normalized().toRotationMatrix();
+
+  Eigen::Matrix3d R = exRbl.inverse();
+  Eigen::Vector3d t = -1.0 * R * exPbl;
+
   exTlb.topLeftCorner(3, 3) = R;
   exTlb.topRightCorner(3, 1) = t;
   exRlb = R;
-
-  exRbl = R.transpose();
   exPlb = t;
-  exPbl = -1.0 * exRbl * exPlb;
 
-  ros::Subscriber subFullCloud = nodeHandler.subscribe<sensor_msgs::PointCloud2>("/full_cloud", 10, fullCallBack);
+  ros::Subscriber subFullCloud = nh.subscribe<sensor_msgs::PointCloud2>("/laser_cloud_filtered", 10, fullCallBack);
   ros::Subscriber sub_imu;
   if (IMU_Mode > 0)
-    sub_imu = nodeHandler.subscribe("/imu_data", 2000, imu_callback, ros::TransportHints().unreliable());
+    sub_imu = nh.subscribe(imu_topic, 2000, imu_callback /*, ros::TransportHints().unreliable()*/);
   if (IMU_Mode < 2)
     WINDOWSIZE = 1;
   else
     WINDOWSIZE = 20;
 
-  pubFullLaserCloud = nodeHandler.advertise<sensor_msgs::PointCloud2>("/full_cloud_mapped", 10);
-  pubLaserOdometry = nodeHandler.advertise<nav_msgs::Odometry>("/odometry_mapped", 5);
-  pubLaserOdometryPath = nodeHandler.advertise<nav_msgs::Path>("/odometry_path_mapped", 5);
+  pubFullLaserCloud = nh.advertise<sensor_msgs::PointCloud2>("/full_cloud_mapped", 10);
+  pubLaserOdometry = nh.advertise<nav_msgs::Odometry>("/odometry_mapped", 5);
+  pubLaserOdometryPath = nh.advertise<nav_msgs::Path>("/odometry_path_mapped", 5);
 
   tfBroadcaster = new tf::TransformBroadcaster();
 

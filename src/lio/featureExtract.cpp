@@ -34,7 +34,8 @@ enum class SensorType
 {
     VELODYNE,
     OUSTER,
-    ROBOSENSE
+    ROBOSENSE,
+    LIVOX
 };
 
 struct smoothness_t
@@ -100,8 +101,6 @@ public:
 
     // voxel filter paprams
     float odometrySurfLeafSize;
-    float mappingCornerLeafSize;
-    float mappingSurfLeafSize;
 
     // CPU Params
     int numberOfCores;
@@ -115,16 +114,22 @@ public:
 
     std_msgs::Header cloudHeader;
 
+    std::vector<int> columnIdnCountVec;
+
     FeatureExtract()
     {
-        nh.param<std::string>("pointCloudTopic", pointCloudTopic, "points_raw");
-        nh.param<std::string>("lidarFrame", lidarFrame, "base_link");
+        nh.param<std::string>("common/pointCloudTopic", pointCloudTopic, "points_raw");
+        nh.param<std::string>("feature_extract/lidarFrame", lidarFrame, "base_link");
 
         std::string sensorStr;
-        nh.param<std::string>("sensor", sensorStr, "");
+        nh.param<std::string>("feature_extract/sensor", sensorStr, "");
         if (sensorStr == "velodyne")
         {
             sensor = SensorType::VELODYNE;
+        }
+        else if (sensorStr == "livox")
+        {
+            sensor = SensorType::LIVOX;
         }
         else if (sensorStr == "ouster")
         {
@@ -137,23 +142,23 @@ public:
         else
         {
             ROS_ERROR_STREAM(
-                "Invalid sensor type (must be either 'velodyne' 'ouster' or 'robosense'): " << sensorStr);
+                "Invalid sensor type (must be either 'velodyne' 'ouster' 'robosense' or 'livox'): " << sensorStr);
             ros::shutdown();
         }
-        nh.param<int>("N_SCAN", N_SCAN, 16);
-        nh.param<int>("Horizon_SCAN", Horizon_SCAN, 1800);
-        nh.param<int>("downsampleRate", downsampleRate, 1);
-        nh.param<float>("lidarMinRange", lidarMinRange, 1.0);
-        nh.param<float>("lidarMaxRange", lidarMaxRange, 1000.0);
+        std::cout << "-- " << sensorStr << ": " << int(sensor) << std::endl;
 
-        nh.param<float>("edgeThreshold", edgeThreshold, 0.1);
-        nh.param<float>("surfThreshold", surfThreshold, 0.1);
-        nh.param<int>("edgeFeatureMinValidNum", edgeFeatureMinValidNum, 10);
-        nh.param<int>("surfFeatureMinValidNum", surfFeatureMinValidNum, 100);
+        nh.param<int>("feature_extract/N_SCAN", N_SCAN, 16);
+        nh.param<int>("feature_extract/Horizon_SCAN", Horizon_SCAN, 1800);
+        nh.param<int>("feature_extract/downsampleRate", downsampleRate, 1);
+        nh.param<float>("feature_extract/lidarMinRange", lidarMinRange, 1.0);
+        nh.param<float>("feature_extract/lidarMaxRange", lidarMaxRange, 1000.0);
 
-        nh.param<float>("odometrySurfLeafSize", odometrySurfLeafSize, 0.2);
-        nh.param<float>("mappingCornerLeafSize", mappingCornerLeafSize, 0.2);
-        nh.param<float>("mappingSurfLeafSize", mappingSurfLeafSize, 0.2);
+        nh.param<float>("feature_extract/edgeThreshold", edgeThreshold, 0.1);
+        nh.param<float>("feature_extract/surfThreshold", surfThreshold, 0.1);
+        nh.param<int>("feature_extract/edgeFeatureMinValidNum", edgeFeatureMinValidNum, 10);
+        nh.param<int>("feature_extract/surfFeatureMinValidNum", surfFeatureMinValidNum, 100);
+
+        nh.param<float>("feature_extract/odometrySurfLeafSize", odometrySurfLeafSize, 0.2);
 
         subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 50, &FeatureExtract::cloudHandler, this);
 
@@ -204,11 +209,14 @@ public:
         inputCloud->clear();
         // reset range matrix for range image projection
         rangeMat = cv::Mat(N_SCAN, Horizon_SCAN, CV_32F, cv::Scalar::all(FLT_MAX));
+        columnIdnCountVec.assign(N_SCAN, 0);
     }
 
     void cloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
     {
-        ros::Time t1 = ros::Time::now();
+        //     判断使用帧首帧尾时间
+        // std::cout << std::setprecision(10) << laserCloudMsg->header.stamp.toSec() - ros::Time::now().toSec() << std::endl;
+
         if (!cachePointCloud(laserCloudMsg))
             return;
 
@@ -223,8 +231,7 @@ public:
         extractFeatures();
 
         publishFeatureCloud();
-        ros::Time t2 = ros::Time::now();
-        // std::cout << "laserCloudInfoHandler takes: " << (t2 - t1).toSec() * 1000 << "ms" << std::endl;
+
         resetParameters();
     }
 #define TEST_LIO_SAM_6AXIS_DATA
@@ -237,8 +244,9 @@ public:
             pcl::moveFromROSMsg(currentCloudMsg, *laserCloudIn);
             inputCloud->points.resize(laserCloudIn->size());
             inputCloud->is_dense = laserCloudIn->is_dense;
+// FIXME:NCLT数据集需要乘以1e-6,其他数据集不需要
 #ifdef TEST_LIO_SAM_6AXIS_DATA
-            timespan = laserCloudIn->points.back().time;
+            timespan = laserCloudIn->points.back().time /* * 1e-6*/;
 #else
             timespan = laserCloudIn->points.back().time - laserCloudIn->points[0].time;
 #endif
@@ -253,7 +261,7 @@ public:
                 dst.normal_y = src.ring; //  ring
                 dst.normal_z = 0;
 #ifdef TEST_LIO_SAM_6AXIS_DATA
-                dst.normal_x = src.time / timespan;
+                dst.normal_x = src.time /* * 1e-6*/ / timespan;
 #else
                 dst.normal_x = (src.time + timespan) / timespan;
 #endif
@@ -261,7 +269,28 @@ public:
 #ifndef TEST_LIO_SAM_6AXIS_DATA
             timespan = 0.0;
 #endif
-            // std::cout << "stamp: " << laserCloudIn->points[0].time << "," << laserCloudIn->points[100].time << ", " << laserCloudIn->points.back().time << std::endl;
+            // std::cout << "header-0:" << cloudHeader.stamp.toSec() - laserCloudIn->points[0].time << ",0: " << laserCloudIn->points[0].time
+            //           << ",100:" << laserCloudIn->points[100].time << ",end " << laserCloudIn->points.back().time << std::endl;
+        }
+        else if (sensor == SensorType::LIVOX)
+        {
+            pcl::moveFromROSMsg(currentCloudMsg, *laserCloudIn);
+            inputCloud->points.resize(laserCloudIn->size());
+            inputCloud->is_dense = laserCloudIn->is_dense;
+            timespan = laserCloudIn->points.back().time;
+            for (size_t i = 0; i < laserCloudIn->size(); i++)
+            {
+                auto &src = laserCloudIn->points[i];
+                auto &dst = inputCloud->points[i];
+                dst.x = src.x;
+                dst.y = src.y;
+                dst.z = src.z;
+                dst.intensity = src.intensity;
+                dst.normal_y = src.ring; //  ring
+                dst.normal_z = 0;
+                dst.normal_x = src.time / timespan;
+            }
+            // std::cout << "stamp: " << laserCloudIn->points[0].time << ", " << laserCloudIn->points.back().time << std::endl;
         }
         else if (sensor == SensorType::OUSTER)
         {
@@ -286,10 +315,6 @@ public:
                 dst.normal_x = src.t / timespan; //        *1e-9f;
             }
             timespan = timespan * 1e-9f;
-            // std::cout << std::endl;
-            // for (int i = tmpOusterCloudIn->size() - 6; i < tmpOusterCloudIn->size(); i++)
-            //     std::cout << tmpOusterCloudIn->points[i].t * 1e-9f << " ,";
-            // std::cout << std::endl;
         }
         else if (sensor == SensorType::ROBOSENSE)
         {
@@ -389,18 +414,28 @@ public:
             if (rowIdn % downsampleRate != 0)
                 continue;
 
-            float horizonAngle = atan2(thisPoint.x, thisPoint.y) * 180 / M_PI;
+            int columnIdn = -1;
+            if (sensor == SensorType::LIVOX)
+            {
+                columnIdn = columnIdnCountVec[rowIdn];
+                columnIdnCountVec[rowIdn] += 1;
+            }
+            else
+            {
+                float horizonAngle = atan2(thisPoint.x, thisPoint.y) * 180 / M_PI;
 
-            static float ang_res_x = 360.0 / float(Horizon_SCAN);
-            int columnIdn = -round((horizonAngle - 90.0) / ang_res_x) + Horizon_SCAN / 2;
-            if (columnIdn >= Horizon_SCAN)
-                columnIdn -= Horizon_SCAN;
+                static float ang_res_x = 360.0 / float(Horizon_SCAN);
+                columnIdn = -round((horizonAngle - 90.0) / ang_res_x) + Horizon_SCAN / 2;
+                if (columnIdn >= Horizon_SCAN)
+                    columnIdn -= Horizon_SCAN;
+            }
 
             if (columnIdn < 0 || columnIdn >= Horizon_SCAN)
                 continue;
 
             if (rangeMat.at<float>(rowIdn, columnIdn) != FLT_MAX)
                 continue;
+            // TODO: add deskew here
 
             rangeMat.at<float>(rowIdn, columnIdn) = range;
 
@@ -613,9 +648,7 @@ public:
     void publishFeatureCloud()
     {
         // free cloud info memory
-        // std::cout << "surf: " << surfaceCloud->size() << std::endl;
         freeCloudInfoMemory();
-        // std::cout << "edge: " << cornerCloud->size() << std::endl;
         // save newly extracted features
         cloudInfo.cloud_corner = publishCloud(&pubCornerPoints, cornerCloud, cloudHeader.stamp, lidarFrame);
         cloudInfo.cloud_surface = publishCloud(&pubSurfacePoints, surfaceCloud, cloudHeader.stamp, lidarFrame);
