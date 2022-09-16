@@ -22,6 +22,9 @@ This repository is a Lidar-IMU Localization System with Prior Map Constraint and
 
 ## demo
 
+[video-bilibili](https://www.bilibili.com/video/BV1hT411M7cN?spm_id_from=333.999.0.0&vd_source=438f630fe29bd5049b24c7f05b1bcaa3)
+
+
 <div align="center">
 <img src="./doc/demo.png" width="1000px">
 </div>
