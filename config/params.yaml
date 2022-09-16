@@ -39,4 +39,4 @@ location:
   filedir: "/home/cc/catkin_velodyne/src/LIO_Localization/datamap"
   pointCloudTopic: "/laser_cloud_filtered"
   corner_leaf_: 0.2
-  surf_leaf_: 0.5
+  surf_leaf_: 1.0

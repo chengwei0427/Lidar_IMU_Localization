@@ -173,6 +173,9 @@ private:
   pcl::KdTreeFLANN<PointType>::Ptr kdtree_corner_map;
   pcl::KdTreeFLANN<PointType>::Ptr kdtree_surf_map;
 
+  pcl::KdTreeFLANN<PointType>::Ptr kdtree_corner_localmap;
+  pcl::KdTreeFLANN<PointType>::Ptr kdtree_surf_localmap;
+
   CLOUD_PTR surround_surf;
   CLOUD_PTR surround_corner;
 
@@ -196,7 +199,7 @@ private:
   Eigen::Vector3d delta_tl = Eigen::Vector3d::Zero();
   Eigen::Matrix4d transformLastMapped = Eigen::Matrix4d::Identity();
 
-  static const int localMapWindowSize = 50;
+  static const int localMapWindowSize = 30;
   int localMapID = 0;
   pcl::PointCloud<PointType>::Ptr localCornerMap[localMapWindowSize];
   pcl::PointCloud<PointType>::Ptr localSurfMap[localMapWindowSize];
@@ -235,10 +238,14 @@ public:
     surround_corner.reset(new CLOUD);
     kdtree_keyposes_3d_.reset(new pcl::KdTreeFLANN<PointType>());
     kdtree_keyposes_3d_->setInputCloud(map.cloudKeyPoses3D_); // init 3d-pose kdtree
+
     kdtree_corner_map.reset(new pcl::KdTreeFLANN<PointType>());
     kdtree_corner_map->setInputCloud(map.globalCornerMapCloud_);
     kdtree_surf_map.reset(new pcl::KdTreeFLANN<PointType>());
     kdtree_surf_map->setInputCloud(map.globalSurfMapCloud_);
+
+    kdtree_corner_localmap.reset(new pcl::KdTreeFLANN<PointType>());
+    kdtree_surf_localmap.reset(new pcl::KdTreeFLANN<PointType>());
 
     if (pub_corner_map.getNumSubscribers() > 0)
     {
@@ -360,6 +367,9 @@ public:
     int num_surf_map = 0;
     int windowSize = 1;
 
+    kdtree_corner_localmap->setInputCloud(laserCloudCornerFromLocal);
+    kdtree_surf_localmap->setInputCloud(laserCloudSurfFromLocal);
+
     // store point to line features
     std::vector<std::vector<FeatureLine>>
         vLineFeatures(windowSize);
@@ -375,9 +385,9 @@ public:
     }
     // excute optimize process
     const int max_iters = 5;
-    for (int iterOpt = 0; iterOpt < max_iters; ++iterOpt)
+    int iterOpt = 0;
+    for (; iterOpt < max_iters; ++iterOpt)
     {
-
       {
         Eigen::Map<Eigen::Matrix<double, 6, 1>> PR(para_PR[0]);
         PR.segment<3>(0) = Eigen::Vector3d(pose_in_map(0, 3), pose_in_map(1, 3), pose_in_map(2, 3));
@@ -423,6 +433,8 @@ public:
                                  std::ref(frame.corner),
                                  std::ref(map.globalCornerMapCloud_),
                                  std::ref(kdtree_corner_map),
+                                 std::ref(laserCloudCornerFromLocal),
+                                 std::ref(kdtree_corner_localmap),
                                  std::ref(exTlb),
                                  std::ref(transformTobeMapped));
 
@@ -432,6 +444,8 @@ public:
                                  std::ref(frame.surf),
                                  std::ref(map.globalSurfMapCloud_),
                                  std::ref(kdtree_surf_map),
+                                 std::ref(laserCloudSurfFromLocal),
+                                 std::ref(kdtree_surf_localmap),
                                  std::ref(exTlb),
                                  std::ref(transformTobeMapped));
 
@@ -583,6 +597,7 @@ public:
         }
       }
     }
+    std::cout << "estimate iter: " << iterOpt << std::endl;
   }
 
   void run()
@@ -621,13 +636,20 @@ public:
       }
       else if (initializedFlag == Initialized)
       {
+        TicToc tc;
+        double t1, t2, t3;
         //  TODO: 增加局部地图
-        if (kdtree_surf_map || kdtree_corner_map)
+        int laserCloudCornerFromLocalNum = laserCloudCornerFromLocal->points.size();
+        int laserCloudSurfFromLocalNum = laserCloudSurfFromLocal->points.size();
+        if ((kdtree_surf_map && kdtree_corner_map) ||
+            (laserCloudCornerFromLocalNum > 0 && laserCloudSurfFromLocalNum > 100))
         {
           pose_in_map.topRightCorner(3, 1) = transformLastMapped.topLeftCorner(3, 3) * delta_tl + transformLastMapped.topRightCorner(3, 1);
           pose_in_map.topLeftCorner(3, 3) = transformLastMapped.topLeftCorner(3, 3) * delta_Rl;
-
+          tc.tic();
           Estimate(kframe);
+          t1 = tc.toc();
+          tc.tic();
           pubOdometry(pose_in_map, kframe.time);
           Eigen::Matrix4d transformAftMapped = Eigen::Matrix4d::Identity();
           transformAftMapped = pose_in_map;
@@ -636,8 +658,12 @@ public:
           delta_Rl = Rwlpre.transpose() * transformAftMapped.topLeftCorner(3, 3);
           delta_tl = Rwlpre.transpose() * (transformAftMapped.topRightCorner(3, 1) - Pwlpre);
           transformLastMapped = pose_in_map;
+          t2 = tc.toc();
         }
+        tc.tic();
         MapIncrementLocal(kframe);
+        t3 = tc.toc();
+        std::cout << "LIO takes: " << t1 << ",pubodom:" << t2 << ",mapincrement:" << t3 << std::endl;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -667,16 +693,19 @@ public:
       if (std::fabs(kf.cloud->points[i].normal_z - 2.0) < 1e-5)
         kf.surf->push_back(kf.cloud->points[i]);
     }
-
+    std::cout << "bef-surf: " << kf.surf->size() << ",corner: " << kf.corner->size() << std::endl;
     ds_surf_.setInputCloud(kf.surf);
     ds_surf_.filter(*kf.surf);
     ds_corner_.setInputCloud(kf.corner);
     ds_corner_.filter(*kf.corner);
+    std::cout << "aft-surf: " << kf.surf->size() << ",corner: " << kf.corner->size() << std::endl;
   }
 
   void processPointToLine(std::vector<ceres::CostFunction *> &edges,
                           std::vector<FeatureLine> &vLineFeatures,
                           const pcl::PointCloud<PointType>::Ptr &laserCloudCorner,
+                          const pcl::PointCloud<PointType>::Ptr &laserCloudCornerGlobal,
+                          const pcl::KdTreeFLANN<PointType>::Ptr &kdtreeGlobal,
                           const pcl::PointCloud<PointType>::Ptr &laserCloudCornerLocal,
                           const pcl::KdTreeFLANN<PointType>::Ptr &kdtreeLocal,
                           const Eigen::Matrix4d &exTlb,
@@ -718,6 +747,92 @@ public:
     {
       _pointOri = laserCloudCorner->points[i];
       MAP_MANAGER::pointAssociateToMap(&_pointOri, &_pointSel, m4d);
+
+      //  for global
+      if (laserCloudCornerGlobal->points.size() > 100)
+      {
+        kdtreeGlobal->nearestKSearch(_pointSel, 5, _pointSearchInd2, _pointSearchSqDis2);
+        if (_pointSearchSqDis2[4] < thres_dist)
+        {
+
+          debug_num2++;
+          float cx = 0;
+          float cy = 0;
+          float cz = 0;
+          for (int j = 0; j < 5; j++)
+          {
+            cx += laserCloudCornerGlobal->points[_pointSearchInd2[j]].x;
+            cy += laserCloudCornerGlobal->points[_pointSearchInd2[j]].y;
+            cz += laserCloudCornerGlobal->points[_pointSearchInd2[j]].z;
+          }
+          cx /= 5;
+          cy /= 5;
+          cz /= 5;
+
+          float a11 = 0;
+          float a12 = 0;
+          float a13 = 0;
+          float a22 = 0;
+          float a23 = 0;
+          float a33 = 0;
+          for (int j = 0; j < 5; j++)
+          {
+            float ax = laserCloudCornerGlobal->points[_pointSearchInd2[j]].x - cx;
+            float ay = laserCloudCornerGlobal->points[_pointSearchInd2[j]].y - cy;
+            float az = laserCloudCornerGlobal->points[_pointSearchInd2[j]].z - cz;
+
+            a11 += ax * ax;
+            a12 += ax * ay;
+            a13 += ax * az;
+            a22 += ay * ay;
+            a23 += ay * az;
+            a33 += az * az;
+          }
+          a11 /= 5;
+          a12 /= 5;
+          a13 /= 5;
+          a22 /= 5;
+          a23 /= 5;
+          a33 /= 5;
+
+          _matA1(0, 0) = a11;
+          _matA1(0, 1) = a12;
+          _matA1(0, 2) = a13;
+          _matA1(1, 0) = a12;
+          _matA1(1, 1) = a22;
+          _matA1(1, 2) = a23;
+          _matA1(2, 0) = a13;
+          _matA1(2, 1) = a23;
+          _matA1(2, 2) = a33;
+
+          Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> saes(_matA1);
+          Eigen::Vector3d unit_direction = saes.eigenvectors().col(2);
+
+          if (saes.eigenvalues()[2] > 3 * saes.eigenvalues()[1])
+          {
+            debug_num22++;
+            float x1 = cx + 0.1 * unit_direction[0];
+            float y1 = cy + 0.1 * unit_direction[1];
+            float z1 = cz + 0.1 * unit_direction[2];
+            float x2 = cx - 0.1 * unit_direction[0];
+            float y2 = cy - 0.1 * unit_direction[1];
+            float z2 = cz - 0.1 * unit_direction[2];
+
+            Eigen::Vector3d tripod1(x1, y1, z1);
+            Eigen::Vector3d tripod2(x2, y2, z2);
+            auto *e = Cost_NavState_IMU_Line::Create(Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                                                     tripod1,
+                                                     tripod2,
+                                                     Tbl,
+                                                     Eigen::Matrix<double, 1, 1>(1 / IMUIntegrator::lidar_m));
+            edges.push_back(e);
+            vLineFeatures.emplace_back(Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                                       tripod1,
+                                       tripod2);
+            vLineFeatures.back().ComputeError(m4d);
+          }
+        }
+      }
 
       if (laserCloudCornerLocal->points.size() > 20)
       {
@@ -809,6 +924,8 @@ public:
   void processPointToPlanVec(std::vector<ceres::CostFunction *> &edges,
                              std::vector<FeaturePlanVec> &vPlanFeatures,
                              const pcl::PointCloud<PointType>::Ptr &laserCloudSurf,
+                             const pcl::PointCloud<PointType>::Ptr &laserCloudSurfGlobal,
+                             const pcl::KdTreeFLANN<PointType>::Ptr &kdtreeGlobal,
                              const pcl::PointCloud<PointType>::Ptr &laserCloudSurfLocal,
                              const pcl::KdTreeFLANN<PointType>::Ptr &kdtreeLocal,
                              const Eigen::Matrix4d &exTlb,
@@ -852,6 +969,73 @@ public:
     {
       _pointOri = laserCloudSurf->points[i];
       MAP_MANAGER::pointAssociateToMap(&_pointOri, &_pointSel, m4d);
+      //  for global
+      if (laserCloudSurfGlobal->points.size() > 200)
+      {
+        kdtreeGlobal->nearestKSearch(_pointSel, 5, _pointSearchInd2, _pointSearchSqDis2);
+        if (_pointSearchSqDis2[4] < thres_dist)
+        {
+          debug_num2++;
+          for (int j = 0; j < 5; j++)
+          {
+            _matA0(j, 0) = laserCloudSurfGlobal->points[_pointSearchInd2[j]].x;
+            _matA0(j, 1) = laserCloudSurfGlobal->points[_pointSearchInd2[j]].y;
+            _matA0(j, 2) = laserCloudSurfGlobal->points[_pointSearchInd2[j]].z;
+          }
+          _matX0 = _matA0.colPivHouseholderQr().solve(_matB0);
+
+          float pa = _matX0(0, 0);
+          float pb = _matX0(1, 0);
+          float pc = _matX0(2, 0);
+          float pd = 1;
+
+          float ps = std::sqrt(pa * pa + pb * pb + pc * pc);
+          pa /= ps;
+          pb /= ps;
+          pc /= ps;
+          pd /= ps;
+
+          bool planeValid = true;
+          for (int j = 0; j < 5; j++)
+          {
+            if (std::fabs(pa * laserCloudSurfGlobal->points[_pointSearchInd2[j]].x +
+                          pb * laserCloudSurfGlobal->points[_pointSearchInd2[j]].y +
+                          pc * laserCloudSurfGlobal->points[_pointSearchInd2[j]].z + pd) > 0.2)
+            {
+              planeValid = false;
+              break;
+            }
+          }
+
+          if (planeValid)
+          {
+            debug_num22++;
+            double dist = pa * _pointSel.x +
+                          pb * _pointSel.y +
+                          pc * _pointSel.z + pd;
+            Eigen::Vector3d omega(pa, pb, pc);
+            Eigen::Vector3d point_proj = Eigen::Vector3d(_pointSel.x, _pointSel.y, _pointSel.z) - (dist * omega);
+            Eigen::Vector3d e1(1, 0, 0);
+            Eigen::Matrix3d J = e1 * omega.transpose();
+            Eigen::JacobiSVD<Eigen::Matrix3d> svd(J, Eigen::ComputeThinU | Eigen::ComputeThinV);
+            Eigen::Matrix3d R_svd = svd.matrixV() * svd.matrixU().transpose();
+            Eigen::Matrix3d info = (1.0 / IMUIntegrator::lidar_m) * Eigen::Matrix3d::Identity();
+            info(1, 1) *= plan_weight_tan;
+            info(2, 2) *= plan_weight_tan;
+            Eigen::Matrix3d sqrt_info = info * R_svd.transpose();
+
+            auto *e = Cost_NavState_IMU_Plan_Vec::Create(Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                                                         point_proj,
+                                                         Tbl,
+                                                         sqrt_info);
+            edges.push_back(e);
+            vPlanFeatures.emplace_back(Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                                       point_proj,
+                                       sqrt_info);
+            vPlanFeatures.back().ComputeError(m4d);
+          }
+        }
+      }
 
       if (laserCloudSurfLocal->points.size() > 20)
       {
