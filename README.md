@@ -85,7 +85,7 @@ Set initial pose in rviz
 
 The current version of the system is just a demo and we haven't done enough tests.
 
-There are some parameters in launch files:
+There are some parameters in params.yaml files:
 
 *  IMU_Mode: choose IMU information fusion strategy, there are 3 modes:
     -  0 - without using IMU information, pure LiDAR odometry, motion distortion is removed using a constant velocity model (added 2022-09-16)
@@ -93,10 +93,16 @@ There are some parameters in launch files:
     -  2 - **tightly coupling IMU and LiDAR information (will support later)**
 
 
+## TODO
+
+  - [ ] support tightly coupling IMU and LiDAR in Localization moudle
+  - [ ] estimated positioning accuracy
+  - [x] add test video
+  - [x] add demo example
 
 
 ## Acknowledgements
 
-
+Thanks for LOAM,[LIO_SAM](https://github.com/TixiaoShan/LIO-SAM) ,[LIO-Livox](https://github.com/Livox-SDK/LIO-Livox).
 
 ## Support

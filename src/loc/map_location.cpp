@@ -689,6 +689,7 @@ public:
           std::cout << ANSI_COLOR_GREEN << "icp scan match successful ..." << ANSI_COLOR_RESET << std::endl;
         }
         pubOdometry(pose_in_map, kframe.time);
+        transformLastMapped = pose_in_map;
       }
       else if (initializedFlag == Initialized)
       {
@@ -1285,12 +1286,13 @@ public:
     std::cout << "icp takes: " << tt << "ms" << std::endl;
     CLOUD_PTR output(new CLOUD);
 
-    /*pcl::transformPointCloud(*kframe.cloud, *output, pose_in_map);
+    pcl::transformPointCloud(*kframe.cloud, *output, pose_in_map);
     sensor_msgs::PointCloud2 msg_target;
+    // pcl::toROSMsg(*cloud_icp, msg_target);
     pcl::toROSMsg(*output, msg_target);
     msg_target.header.stamp = ros::Time::now();
     msg_target.header.frame_id = "world";
-    pub_surf_.publish(msg_target);*/
+    pub_surf_.publish(msg_target);
 
     return true;
   }
