@@ -148,6 +148,35 @@ struct FeaturePlanVec
 
 class map_location
 {
+public:
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  struct LidarFrame
+  {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    CLOUD_PTR laserCloud;
+    CLOUD_PTR corner;
+    CLOUD_PTR surf;
+    IMUIntegrator imuIntegrator;
+    Eigen::Vector3d P;
+    Eigen::Vector3d V;
+    Eigen::Quaterniond Q;
+    Eigen::Vector3d bg;
+    Eigen::Vector3d ba;
+    double timeStamp;
+    LidarFrame()
+    {
+      corner.reset(new CLOUD);
+      surf.reset(new CLOUD);
+      laserCloud.reset(new CLOUD());
+      P.setZero();
+      V.setZero();
+      Q.setIdentity();
+      bg.setZero();
+      ba.setZero();
+      timeStamp = 0;
+    }
+  };
+
 private:
   ros::NodeHandle nh_;
   ros::Subscriber sub_cloud_;
@@ -182,15 +211,20 @@ private:
   CLOUD_PTR surround_surf;
   CLOUD_PTR surround_corner;
 
+  CLOUD_PTR laserCloudFullRes;
+
   pcl::VoxelGrid<PointType> ds_corner_;
   pcl::VoxelGrid<PointType> ds_surf_;
 
-  MutexDeque<kylidar> kframeQueue;
+  MutexDeque<sensor_msgs::PointCloud2ConstPtr> _lidarMsgQueue;
   MutexDeque<sensor_msgs::ImuConstPtr> _imuMsgQueue;
   InitializedFlag initializedFlag;
 
   PointTypePose initpose;
-  Eigen::Matrix4d pose_in_map;
+
+  int WINDOWSIZE;
+  bool LidarIMUInited = false;
+  boost::shared_ptr<std::list<LidarFrame>> lidarFrameList;
 
   MAP_MANAGER *map_manager;
   static const int SLIDEWINDOWSIZE = 2;
@@ -275,20 +309,15 @@ public:
     laserCloudCornerFromLocal.reset(new pcl::PointCloud<PointType>);
     laserCloudSurfFromLocal.reset(new pcl::PointCloud<PointType>);
 
-    pose_in_map = Eigen::Matrix4d::Identity();
     map_manager = new MAP_MANAGER(0.2, 0.3);
   }
   ~map_location();
 
-  void cloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
+  void cloudHandler(const sensor_msgs::PointCloud2ConstPtr &msg)
   {
-    kylidar kframe;
-    pcl::fromROSMsg(*laserCloudMsg, *kframe.cloud);
-    kframe.time = laserCloudMsg->header.stamp.toSec();
-
-    if (!kframeQueue.empty() && (initializedFlag != Initialized)) //  由于tf关系，导致发布时间存在滞后，tf无法显示
-      kframeQueue.clear();
-    kframeQueue.push_back(kframe);
+    if (!_lidarMsgQueue.empty() && (initializedFlag != Initialized)) //  由于tf关系，导致发布时间存在滞后，tf无法显示
+      _lidarMsgQueue.clear();
+    _lidarMsgQueue.push_back(msg);
   }
 
   void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
@@ -297,14 +326,16 @@ public:
     _imuMsgQueue.push_back(imu_msg);
   }
 
-  void ExtractFeature(kylidar &kf)
+  void ExtractFeature(LidarFrame &kf)
   {
-    for (const auto &p : kf.cloud->points)
+    kf.corner->clear();
+    kf.surf->clear();
+    for (const auto &p : kf.laserCloud->points)
     {
       if (std::fabs(p.normal_z - 1.0) < 1e-5)
         kf.corner->push_back(p);
     }
-    for (const auto &p : kf.cloud->points)
+    for (const auto &p : kf.laserCloud->points)
     {
       if (std::fabs(p.normal_z - 2.0) < 1e-5)
         kf.surf->push_back(p);
@@ -343,16 +374,22 @@ public:
     { // TODO: 非第一次执行，需要重置部分参数
       delta_Rl = Eigen::Matrix3d::Identity();
       delta_tl = Eigen::Vector3d::Zero();
+      for (int i = 0; i < localMapWindowSize; i++)
+      {
+        localCornerMap[i]->clear();
+        localSurfMap[i]->clear();
+      }
+      localMapID = 0;
     }
     initializedFlag = Initializing;
   }
 
-  void pubOdometry(Eigen::Matrix4d &pose, double &time)
+  void pubOdometry(Eigen::Matrix4d pose, double &time)
   {
-    Eigen::Quaterniond q(pose.block<3, 3>(0, 0));
+    Eigen::Quaterniond Q(pose.block<3, 3>(0, 0));
     ros::Time ros_time = ros::Time().fromSec(time);
     transform_.stamp_ = ros_time;
-    transform_.setRotation(tf::Quaternion(q.x(), q.y(), q.z(), q.w()));
+    transform_.setRotation(tf::Quaternion(Q.x(), Q.y(), Q.z(), Q.w()));
     transform_.setOrigin(tf::Vector3(pose(0, 3), pose(1, 3), pose(2, 3)));
     transform_.frame_id_ = "world";
     transform_.child_frame_id_ = "base_link";
@@ -362,10 +399,10 @@ public:
     laserPose.header.frame_id = "world";
     laserPose.header.stamp = ros_time;
 
-    laserPose.pose.orientation.x = q.x();
-    laserPose.pose.orientation.y = q.y();
-    laserPose.pose.orientation.z = q.z();
-    laserPose.pose.orientation.w = q.w();
+    laserPose.pose.orientation.x = Q.x();
+    laserPose.pose.orientation.y = Q.y();
+    laserPose.pose.orientation.z = Q.z();
+    laserPose.pose.orientation.w = Q.w();
     laserPose.pose.position.x = pose(0, 3);
     laserPose.pose.position.y = pose(1, 3);
     laserPose.pose.position.z = pose(2, 3);
@@ -376,7 +413,68 @@ public:
     pubLaserOdometryPath_.publish(laserOdoPath);
   }
 
-  void Estimate(kylidar &frame)
+  void pubOdometry(LidarFrame &frame)
+  {
+    ros::Time ros_time = ros::Time().fromSec(frame.timeStamp);
+    transform_.stamp_ = ros_time;
+    transform_.setRotation(tf::Quaternion(frame.Q.x(), frame.Q.y(), frame.Q.z(), frame.Q.w()));
+    transform_.setOrigin(tf::Vector3(frame.P(0), frame.P(1), frame.P(2)));
+    transform_.frame_id_ = "world";
+    transform_.child_frame_id_ = "base_link";
+    broadcaster_.sendTransform(transform_);
+
+    geometry_msgs::PoseStamped laserPose;
+    laserPose.header.frame_id = "world";
+    laserPose.header.stamp = ros_time;
+
+    laserPose.pose.orientation.x = frame.Q.x();
+    laserPose.pose.orientation.y = frame.Q.y();
+    laserPose.pose.orientation.z = frame.Q.z();
+    laserPose.pose.orientation.w = frame.Q.w();
+    laserPose.pose.position.x = frame.P(0);
+    laserPose.pose.position.y = frame.P(1);
+    laserPose.pose.position.z = frame.P(2);
+
+    laserOdoPath.header.stamp = ros_time;
+    laserOdoPath.poses.push_back(laserPose);
+    laserOdoPath.header.frame_id = "/world";
+    pubLaserOdometryPath_.publish(laserOdoPath);
+  }
+
+  void vector2double(const std::list<LidarFrame> &lidarFrameList)
+  {
+    int i = 0;
+    for (const auto &l : lidarFrameList)
+    {
+      Eigen::Map<Eigen::Matrix<double, 6, 1>> PR(para_PR[i]);
+      PR.segment<3>(0) = l.P;
+      PR.segment<3>(3) = Sophus::SO3d(l.Q).log();
+
+      Eigen::Map<Eigen::Matrix<double, 9, 1>> VBias(para_VBias[i]);
+      VBias.segment<3>(0) = l.V;
+      VBias.segment<3>(3) = l.bg;
+      VBias.segment<3>(6) = l.ba;
+      i++;
+    }
+  }
+
+  void double2vector(std::list<LidarFrame> &lidarFrameList)
+  {
+    int i = 0;
+    for (auto &l : lidarFrameList)
+    {
+      Eigen::Map<const Eigen::Matrix<double, 6, 1>> PR(para_PR[i]);
+      Eigen::Map<const Eigen::Matrix<double, 9, 1>> VBias(para_VBias[i]);
+      l.P = PR.segment<3>(0);
+      l.Q = Sophus::SO3d::exp(PR.segment<3>(3)).unit_quaternion();
+      l.V = VBias.segment<3>(0);
+      l.bg = VBias.segment<3>(3);
+      l.ba = VBias.segment<3>(6);
+      i++;
+    }
+  }
+
+  void Estimate(std::list<LidarFrame> &frameList)
   {
     int num_corner_map = 0;
     int num_surf_map = 0;
@@ -385,40 +483,48 @@ public:
     kdtree_corner_localmap->setInputCloud(laserCloudCornerFromLocal);
     kdtree_surf_localmap->setInputCloud(laserCloudSurfFromLocal);
 
+    for (auto &frame : frameList)
+      ExtractFeature(frame);
+
     // store point to line features
-    std::vector<std::vector<FeatureLine>>
-        vLineFeatures(windowSize);
+    std::vector<std::vector<FeatureLine>> vLineFeatures(windowSize);
     for (auto &v : vLineFeatures)
-    {
       v.reserve(2000);
-    }
+
     // store point to plan features
     std::vector<std::vector<FeaturePlanVec>> vPlanFeatures(windowSize);
     for (auto &v : vPlanFeatures)
-    {
       v.reserve(2000);
+
+    if (windowSize == SLIDEWINDOWSIZE)
+    {
+      plan_weight_tan = 0.0003;
+      thres_dist = 1.0;
     }
+    else
+    {
+      plan_weight_tan = 0.0;
+      thres_dist = 25.0;
+    }
+
     // excute optimize process
     const int max_iters = 5;
     int iterOpt = 0;
     for (; iterOpt < max_iters; ++iterOpt)
     {
-      {
-        Eigen::Map<Eigen::Matrix<double, 6, 1>> PR(para_PR[0]);
-        PR.segment<3>(0) = Eigen::Vector3d(pose_in_map(0, 3), pose_in_map(1, 3), pose_in_map(2, 3));
-        Eigen::Quaterniond Q(pose_in_map.block<3, 3>(0, 0));
-        Q.normalized();
-        PR.segment<3>(3) = Sophus::SO3d(Q).log();
-
-        Eigen::Map<Eigen::Matrix<double, 9, 1>> VBias(para_VBias[0]);
-        VBias.segment<3>(0) = Eigen::Vector3d(0, 0, 0);
-        VBias.segment<3>(3) = Eigen::Vector3d(0, 0, 0);
-        VBias.segment<3>(6) = Eigen::Vector3d(0, 0, 0);
-      }
+      vector2double(frameList);
 
       // create huber loss function
       ceres::LossFunction *loss_function = NULL;
-      loss_function = new ceres::HuberLoss(300);
+      loss_function = new ceres::HuberLoss(0.1 / IMUIntegrator::lidar_m);
+      if (windowSize == SLIDEWINDOWSIZE)
+      {
+        loss_function = NULL;
+      }
+      else
+      {
+        loss_function = new ceres::HuberLoss(0.1 / IMUIntegrator::lidar_m);
+      }
 
       ceres::Problem::Options problem_options;
       ceres::Problem problem(problem_options);
@@ -431,21 +537,26 @@ public:
       for (int i = 0; i < windowSize; ++i)
         problem.AddParameterBlock(para_VBias[i], 9);
 
-      Eigen::Quaterniond q_before_opti(pose_in_map.block<3, 3>(0, 0));
-      Eigen::Vector3d t_before_opti = Eigen::Vector3d(pose_in_map(0, 3), pose_in_map(1, 3), pose_in_map(2, 3));
+      //  TODO: add imu here
+
+      Eigen::Quaterniond q_before_opti = frameList.back().Q;
+      Eigen::Vector3d t_before_opti = frameList.back().P;
 
       std::vector<std::vector<ceres::CostFunction *>> edgesLine(windowSize);
       std::vector<std::vector<ceres::CostFunction *>> edgesPlan(windowSize);
       std::thread threads[2];
       for (int f = 0; f < windowSize; ++f)
       {
+        auto frame_curr = frameList.begin();
+        std::advance(frame_curr, f);
         Eigen::Matrix4d transformTobeMapped = Eigen::Matrix4d::Identity();
-        transformTobeMapped = pose_in_map;
+        transformTobeMapped.topLeftCorner(3, 3) = frame_curr->Q.toRotationMatrix();
+        transformTobeMapped.topRightCorner(3, 1) = frame_curr->P;
 
         threads[0] = std::thread(&map_location::processPointToLine, this,
                                  std::ref(edgesLine[f]),
                                  std::ref(vLineFeatures[f]),
-                                 std::ref(frame.corner),
+                                 std::ref(frame_curr->corner),
                                  std::ref(map.globalCornerMapCloud_),
                                  std::ref(kdtree_corner_map),
                                  std::ref(laserCloudCornerFromLocal),
@@ -456,7 +567,7 @@ public:
         threads[1] = std::thread(&map_location::processPointToPlanVec, this,
                                  std::ref(edgesPlan[f]),
                                  std::ref(vPlanFeatures[f]),
-                                 std::ref(frame.surf),
+                                 std::ref(frame_curr->surf),
                                  std::ref(map.globalSurfMapCloud_),
                                  std::ref(kdtree_surf_map),
                                  std::ref(laserCloudSurfFromLocal),
@@ -583,15 +694,10 @@ public:
       ceres::Solver::Summary summary;
       ceres::Solve(options, &problem, &summary);
 
-      {
-        Eigen::Map<const Eigen::Matrix<double, 6, 1>> PR(para_PR[0]);
-        Eigen::Map<const Eigen::Matrix<double, 9, 1>> VBias(para_VBias[0]);
-        pose_in_map.block<3, 3>(0, 0) = Sophus::SO3d::exp(PR.segment<3>(3)).unit_quaternion().matrix();
-        pose_in_map.block<3, 1>(0, 3) = PR.segment<3>(0);
-      }
+      double2vector(frameList);
 
-      Eigen::Quaterniond q_after_opti(pose_in_map.block<3, 3>(0, 0));
-      Eigen::Vector3d t_after_opti(pose_in_map.block<3, 1>(0, 3));
+      Eigen::Quaterniond q_after_opti = frameList.back().Q;
+      Eigen::Vector3d t_after_opti = frameList.back().P;
 
       double deltaR = (q_before_opti.angularDistance(q_after_opti)) * 180.0 / M_PI;
       double deltaT = (t_before_opti - t_after_opti).norm();
@@ -628,14 +734,17 @@ public:
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         continue;
       }
-      if (kframeQueue.empty())
+      if (_lidarMsgQueue.empty())
       {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         continue;
       }
 
-      kylidar kframe = kframeQueue.pop_front();
-      time_curr_lidar = kframe.time;
+      //  update frame
+      time_curr_lidar = _lidarMsgQueue.front()->header.stamp.toSec();
+      laserCloudFullRes.reset(new CLOUD());
+      pcl::fromROSMsg(*_lidarMsgQueue.front(), *laserCloudFullRes);
+      _lidarMsgQueue.pop_front();
 
       if (IMU_Mode > 0 && time_last_lidar > 0)
       {
@@ -657,39 +766,68 @@ public:
         }
       }
 
-      IMUIntegrator imuIntegrator;
+      LidarFrame lidarFrame;
+      lidarFrame.timeStamp = time_curr_lidar;
+      lidarFrame.laserCloud = laserCloudFullRes;
+
+      boost::shared_ptr<std::list<LidarFrame>> lidar_list;
+
       if (!vimuMsg.empty())
       {
-        imuIntegrator.PushIMUMsg(vimuMsg);
-        imuIntegrator.GyroIntegration(time_last_lidar);
-        delta_Rl = imuIntegrator.GetDeltaQ().toRotationMatrix();
-        pose_in_map.topRightCorner(3, 1) = transformLastMapped.topLeftCorner(3, 3) * delta_tl + transformLastMapped.topRightCorner(3, 1);
-        pose_in_map.topLeftCorner(3, 3) = transformLastMapped.topLeftCorner(3, 3) * delta_Rl;
+        if (!LidarIMUInited)
+        {
+          lidarFrame.imuIntegrator.PushIMUMsg(vimuMsg);
+          lidarFrame.imuIntegrator.GyroIntegration(time_last_lidar);
+          delta_Rl = lidarFrame.imuIntegrator.GetDeltaQ().toRotationMatrix();
+
+          //  predict current lidar pose
+          lidarFrame.P = transformLastMapped.topLeftCorner(3, 3) * delta_tl + transformLastMapped.topRightCorner(3, 1);
+          Eigen::Matrix3d m3d = transformLastMapped.topLeftCorner(3, 3) * delta_Rl;
+          lidarFrame.Q = m3d;
+
+          lidar_list.reset(new std::list<LidarFrame>);
+          lidar_list->push_back(lidarFrame);
+        }
+        else
+        {
+        }
       }
       else
       {
-        //  predict pose use constant velocity
-        pose_in_map.topRightCorner(3, 1) = transformLastMapped.topLeftCorner(3, 3) * delta_tl + transformLastMapped.topRightCorner(3, 1);
-        pose_in_map.topLeftCorner(3, 3) = transformLastMapped.topLeftCorner(3, 3) * delta_Rl;
+        if (LidarIMUInited)
+          break;
+        else
+        {
+          //  predict pose use constant velocity
+          lidarFrame.P = transformLastMapped.topLeftCorner(3, 3) * delta_tl + transformLastMapped.topRightCorner(3, 1);
+          Eigen::Matrix3d m3d = transformLastMapped.topLeftCorner(3, 3) * delta_Rl;
+          lidarFrame.Q = m3d;
+
+          lidar_list.reset(new std::list<LidarFrame>);
+          lidar_list->push_back(lidarFrame);
+        }
       }
 
-      RemoveLidarDistortion(kframe, delta_Rl, delta_tl);
-
+      RemoveLidarDistortion(laserCloudFullRes, delta_Rl, delta_tl);
+      //  publish cloud after remove distort
       sensor_msgs::PointCloud2 laserCloudMsg;
-      pcl::toROSMsg(*kframe.cloud, laserCloudMsg);
+      pcl::toROSMsg(*lidarFrame.laserCloud, laserCloudMsg);
       laserCloudMsg.header.frame_id = "/base_link";
-      laserCloudMsg.header.stamp.fromSec(kframe.time);
+      laserCloudMsg.header.stamp.fromSec(lidarFrame.timeStamp);
       pubMappedPoints_.publish(laserCloudMsg);
 
       if (initializedFlag == Initializing)
       {
-        if (ICPScanMatchGlobal(kframe))
+        if (ICPScanMatchGlobal(*lidar_list))
         {
           initializedFlag = Initialized;
           std::cout << ANSI_COLOR_GREEN << "icp scan match successful ..." << ANSI_COLOR_RESET << std::endl;
         }
-        pubOdometry(pose_in_map, kframe.time);
-        transformLastMapped = pose_in_map;
+
+        transformLastMapped.topLeftCorner(3, 3) = lidarFrame.Q.toRotationMatrix();
+        transformLastMapped.topRightCorner(3, 1) = lidarFrame.P;
+
+        pubOdometry(transformLastMapped, lidar_list->front().timeStamp);
       }
       else if (initializedFlag == Initialized)
       {
@@ -702,59 +840,62 @@ public:
             (laserCloudCornerFromLocalNum > 0 && laserCloudSurfFromLocalNum > 100))
         {
           tc.tic();
-          Estimate(kframe);
+          Estimate(*lidar_list);
           t1 = tc.toc();
           tc.tic();
-          pubOdometry(pose_in_map, kframe.time);
+
           Eigen::Matrix4d transformAftMapped = Eigen::Matrix4d::Identity();
-          transformAftMapped = pose_in_map;
+          transformAftMapped.topLeftCorner(3, 3) = lidar_list->front().Q.toRotationMatrix();
+          transformAftMapped.topRightCorner(3, 1) = lidar_list->front().P;
+          pubOdometry(transformAftMapped, lidar_list->front().timeStamp);
+
           Eigen::Matrix3d Rwlpre = transformLastMapped.topLeftCorner(3, 3);
           Eigen::Vector3d Pwlpre = transformLastMapped.topRightCorner(3, 1);
           delta_Rl = Rwlpre.transpose() * transformAftMapped.topLeftCorner(3, 3);
           delta_tl = Rwlpre.transpose() * (transformAftMapped.topRightCorner(3, 1) - Pwlpre);
-          transformLastMapped = pose_in_map;
+          transformLastMapped = transformAftMapped;
           t2 = tc.toc();
         }
         tc.tic();
-        MapIncrementLocal(kframe);
+        MapIncrementLocal(lidar_list->front());
         t3 = tc.toc();
         std::cout << "LIO takes: " << t1 << ",pubodom:" << t2 << ",mapincrement:" << t3 << std::endl;
       }
-      time_last_lidar = time_curr_lidar; // ros::Time().fromSec(kframe.time); //  update time
+      time_last_lidar = time_curr_lidar; //  update time
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
 
-  void RemoveLidarDistortion(kylidar &kf,
+  void RemoveLidarDistortion(CLOUD_PTR &laserCloud,
                              const Eigen::Matrix3d &dRlc, const Eigen::Vector3d &dtlc)
   {
-    int PointsNum = kf.cloud->points.size();
+    int PointsNum = laserCloud->points.size();
     for (int i = 0; i < PointsNum; i++)
     {
       Eigen::Vector3d startP;
-      float s = kf.cloud->points[i].normal_x; //  time intervel
+      float s = laserCloud->points[i].normal_x; //  time intervel
       Eigen::Quaterniond qlc = Eigen::Quaterniond(dRlc).normalized();
       Eigen::Quaterniond delta_qlc = Eigen::Quaterniond::Identity().slerp(s, qlc).normalized(); // 插值
       const Eigen::Vector3d delta_Plc = s * dtlc;
-      startP = delta_qlc * Eigen::Vector3d(kf.cloud->points[i].x, kf.cloud->points[i].y, kf.cloud->points[i].z) + delta_Plc;
+      startP = delta_qlc * Eigen::Vector3d(laserCloud->points[i].x, laserCloud->points[i].y, laserCloud->points[i].z) + delta_Plc;
       Eigen::Vector3d _po = dRlc.transpose() * (startP - dtlc);
 
-      kf.cloud->points[i].x = _po(0);
-      kf.cloud->points[i].y = _po(1);
-      kf.cloud->points[i].z = _po(2);
-      kf.cloud->points[i].normal_x = 1.0;
+      laserCloud->points[i].x = _po(0);
+      laserCloud->points[i].y = _po(1);
+      laserCloud->points[i].z = _po(2);
+      laserCloud->points[i].normal_x = 1.0;
 
-      if (std::fabs(kf.cloud->points[i].normal_z - 1.0) < 1e-5)
-        kf.corner->push_back(kf.cloud->points[i]);
-      if (std::fabs(kf.cloud->points[i].normal_z - 2.0) < 1e-5)
-        kf.surf->push_back(kf.cloud->points[i]);
+      // if (std::fabs(kf.laserCloud->points[i].normal_z - 1.0) < 1e-5)
+      //   kf.corner->push_back(kf.laserCloud->points[i]);
+      // if (std::fabs(kf.laserCloud->points[i].normal_z - 2.0) < 1e-5)
+      //   kf.surf->push_back(kf.laserCloud->points[i]);
     }
-    std::cout << "bef-surf: " << kf.surf->size() << ",corner: " << kf.corner->size() << std::endl;
+    /*std::cout << "bef-surf: " << kf.surf->size() << ",corner: " << kf.corner->size() << std::endl;
     ds_surf_.setInputCloud(kf.surf);
     ds_surf_.filter(*kf.surf);
     ds_corner_.setInputCloud(kf.corner);
     ds_corner_.filter(*kf.corner);
-    std::cout << "aft-surf: " << kf.surf->size() << ",corner: " << kf.corner->size() << std::endl;
+    std::cout << "aft-surf: " << kf.surf->size() << ",corner: " << kf.corner->size() << std::endl;*/
   }
 
   bool fetchImuMsgs(double startTime, double endTime, std::vector<sensor_msgs::ImuConstPtr> &vimuMsg)
@@ -1214,10 +1355,13 @@ public:
     }
   }
 
-  void MapIncrementLocal(kylidar &kframe)
+  void MapIncrementLocal(LidarFrame &kframe)
   {
     int laserCloudCornerStackNum = kframe.corner->points.size();
     int laserCloudSurfStackNum = kframe.surf->points.size();
+    Eigen::Matrix4d pose_in_map = Eigen::Matrix4d::Identity();
+    pose_in_map.topLeftCorner(3, 3) = kframe.Q.toRotationMatrix();
+    pose_in_map.topRightCorner(3, 1) = kframe.P;
     PointType pointSel;
     PointType pointSel2;
     size_t Id = localMapID % localMapWindowSize;
@@ -1251,13 +1395,25 @@ public:
     localMapID++;
   }
 
-  bool ICPScanMatchGlobal(kylidar &kframe)
+  bool ICPScanMatchGlobal(std::list<LidarFrame> &kframeList)
   {
+    if (kframeList.size() != 1)
+      std::cout << "may error,only process one lidar frame" << std::endl;
+    auto &kframe = kframeList.front();
+    CLOUD_PTR surf(new CLOUD());
+    for (const auto &p : kframe.laserCloud->points)
+    {
+      if (std::fabs(p.normal_z - 2.0) < 1e-5)
+        surf->push_back(p);
+    }
+    ds_surf_.setInputCloud(surf);
+    ds_surf_.filter(*surf);
+
     TicToc tc;
     tc.tic();
     CLOUD_PTR cloud_icp(new CLOUD());
-    // *cloud_icp += *TransformPointCloud(kframe.corner, &initpose);
-    *cloud_icp += *TransformPointCloud(kframe.surf, &initpose);
+    // *cloud_icp += *TransformPointCloud(corner, &initpose);
+    *cloud_icp += *TransformPointCloud(surf, &initpose);
 
     pcl::IterativeClosestPoint<PointType, PointType> icp;
     icp.setMaxCorrespondenceDistance(50);
@@ -1280,19 +1436,22 @@ public:
     correct_transform = icp.getFinalTransformation();
     Eigen::Matrix4d curr_pose = toMatrix(initpose);
 
-    pose_in_map = correct_transform.matrix().cast<double>() * curr_pose;
-    pose_in_map.block<3, 3>(0, 0) = Eigen::Quaterniond(pose_in_map.block<3, 3>(0, 0)).normalized().matrix();
+    Eigen::Matrix4d pose = correct_transform.matrix().cast<double>() * curr_pose;
+
+    kframe.P = pose.topRightCorner(3, 1); //  update pose here
+    kframe.Q = pose.block<3, 3>(0, 0);
+
     double tt = tc.toc();
     std::cout << "icp takes: " << tt << "ms" << std::endl;
     CLOUD_PTR output(new CLOUD);
 
-    pcl::transformPointCloud(*kframe.cloud, *output, pose_in_map);
-    sensor_msgs::PointCloud2 msg_target;
-    // pcl::toROSMsg(*cloud_icp, msg_target);
-    pcl::toROSMsg(*output, msg_target);
-    msg_target.header.stamp = ros::Time::now();
-    msg_target.header.frame_id = "world";
-    pub_surf_.publish(msg_target);
+    // pcl::transformPointCloud(*kframe.laserCloud, *output, pose_in_map);
+    // sensor_msgs::PointCloud2 msg_target;
+    // // pcl::toROSMsg(*cloud_icp, msg_target);
+    // pcl::toROSMsg(*output, msg_target);
+    // msg_target.header.stamp = ros::Time::now();
+    // msg_target.header.frame_id = "world";
+    // pub_surf_.publish(msg_target);
 
     return true;
   }
