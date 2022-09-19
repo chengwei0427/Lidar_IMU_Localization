@@ -14,10 +14,10 @@ This repository is a Lidar-IMU Localization System with Prior Map Constraint and
 <img src="./doc/system.png" width="1000px">
 </div>
 
-## Modification
 
-  - TBA
-  
+
+  - A Modified Tightly coupled Lidar-imu laserodometry [LIO-Livox-modified](https://github.com/chengwei0427/LIO-Livox-modified);
+  - A Lidar-IMU Localization System with Prior Map Constraint and Lio Constraint for 3D LiDAR;
 
 
 ## demo
@@ -53,9 +53,45 @@ catkin_make
 
 ## Run with bag files:
 
---add later
+(1) generate global map with [LIO-SAM-modified](https://github.com/chengwei0427/LIO-SAM-modified)
+
+```
+roslaunch GC_LOAM run.launch  
+```
+
+```
+rosbag play yourbagname.bag --clock
+```
+
+```
+rosserve call /save_map 
+```
+
+(2) run localization with global map and your test bag
+
+```
+rosbag LIO_Localization run_loc.launch
+```
+
+```
+rosbag play yourbagname.bag --clock
+``` 
+
+```
+Set initial pose in rviz
+```
 
 ## Notes:
+
+The current version of the system is just a demo and we haven't done enough tests.
+
+There are some parameters in launch files:
+
+*  IMU_Mode: choose IMU information fusion strategy, there are 3 modes:
+    -  0 - without using IMU information, pure LiDAR odometry, motion distortion is removed using a constant velocity model (added 2022-09-16)
+    -  1 - using IMU preintegration to remove motion distortion (added 2022-09-19)
+    -  2 - **tightly coupling IMU and LiDAR information (will support later)**
+
 
 
 
