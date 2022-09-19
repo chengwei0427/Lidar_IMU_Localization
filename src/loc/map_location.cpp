@@ -151,6 +151,7 @@ class map_location
 private:
   ros::NodeHandle nh_;
   ros::Subscriber sub_cloud_;
+  ros::Subscriber sub_imu_;
   ros::Subscriber sub_initial_pose_;
 
   ros::Publisher pub_corner_map;
@@ -166,6 +167,8 @@ private:
   pcdmap map;
   std::string filename;
   std::string pointCloudTopic;
+  std::string imu_topic;
+  int IMU_Mode = 0;
   double corner_leaf_;
   double surf_leaf_;
 
@@ -183,6 +186,7 @@ private:
   pcl::VoxelGrid<PointType> ds_surf_;
 
   MutexDeque<kylidar> kframeQueue;
+  MutexDeque<sensor_msgs::ImuConstPtr> _imuMsgQueue;
   InitializedFlag initializedFlag;
 
   PointTypePose initpose;
@@ -211,10 +215,15 @@ public:
   {
     nh_.param<std::string>("location/filedir", filename, "");
     nh_.param<std::string>("location/pointCloudTopic", pointCloudTopic, "points_raw");
+    nh_.param<std::string>("location/imuTopic", imu_topic, "/livox/imu");
+    nh_.param<int>("location/IMU_Mode", IMU_Mode, 0);
     nh_.param<double>("location/corner_leaf_", corner_leaf_, 0.2);
     nh_.param<double>("location/surf_leaf_", surf_leaf_, 0.5);
 
     sub_cloud_ = nh_.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 50, &map_location::cloudHandler, this);
+    if (IMU_Mode > 0)
+      sub_imu_ = nh_.subscribe(imu_topic, 2000, &map_location::imu_callback, this);
+
     sub_initial_pose_ = nh_.subscribe<geometry_msgs::PoseWithCovarianceStamped>("/initialpose", 1, &map_location::initialPoseCB, this);
 
     pub_corner_map = nh_.advertise<sensor_msgs::PointCloud2>("/global_corner_map", 1);
@@ -280,6 +289,12 @@ public:
     if (!kframeQueue.empty() && (initializedFlag != Initialized)) //  由于tf关系，导致发布时间存在滞后，tf无法显示
       kframeQueue.clear();
     kframeQueue.push_back(kframe);
+  }
+
+  void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
+  {
+    // push IMU msg to queue
+    _imuMsgQueue.push_back(imu_msg);
   }
 
   void ExtractFeature(kylidar &kf)
@@ -602,6 +617,9 @@ public:
 
   void run()
   {
+    double time_last_lidar = -1;
+    double time_curr_lidar = -1;
+    std::vector<sensor_msgs::ImuConstPtr> vimuMsg;
     while (true)
     {
 
@@ -617,6 +635,44 @@ public:
       }
 
       kylidar kframe = kframeQueue.pop_front();
+      time_curr_lidar = kframe.time;
+
+      if (IMU_Mode > 0 && time_last_lidar > 0)
+      {
+        // get IMU msg int the Specified time interval
+        vimuMsg.clear();
+        int countFail = 0;
+        while (!fetchImuMsgs(time_last_lidar, time_curr_lidar, vimuMsg))
+        {
+          countFail++;
+          if (countFail > 100)
+          {
+            if (_imuMsgQueue.empty())
+              std::cout << "imu queue is empty." << std::endl;
+            else
+              std::cout << "imu time: " << _imuMsgQueue.front()->header.stamp.toSec() << "-->" << _imuMsgQueue.back()->header.stamp.toSec() << std::endl;
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+      }
+
+      IMUIntegrator imuIntegrator;
+      if (!vimuMsg.empty())
+      {
+        imuIntegrator.PushIMUMsg(vimuMsg);
+        imuIntegrator.GyroIntegration(time_last_lidar);
+        delta_Rl = imuIntegrator.GetDeltaQ().toRotationMatrix();
+        pose_in_map.topRightCorner(3, 1) = transformLastMapped.topLeftCorner(3, 3) * delta_tl + transformLastMapped.topRightCorner(3, 1);
+        pose_in_map.topLeftCorner(3, 3) = transformLastMapped.topLeftCorner(3, 3) * delta_Rl;
+      }
+      else
+      {
+        //  predict pose use constant velocity
+        pose_in_map.topRightCorner(3, 1) = transformLastMapped.topLeftCorner(3, 3) * delta_tl + transformLastMapped.topRightCorner(3, 1);
+        pose_in_map.topLeftCorner(3, 3) = transformLastMapped.topLeftCorner(3, 3) * delta_Rl;
+      }
+
       RemoveLidarDistortion(kframe, delta_Rl, delta_tl);
 
       sensor_msgs::PointCloud2 laserCloudMsg;
@@ -644,8 +700,6 @@ public:
         if ((kdtree_surf_map && kdtree_corner_map) ||
             (laserCloudCornerFromLocalNum > 0 && laserCloudSurfFromLocalNum > 100))
         {
-          pose_in_map.topRightCorner(3, 1) = transformLastMapped.topLeftCorner(3, 3) * delta_tl + transformLastMapped.topRightCorner(3, 1);
-          pose_in_map.topLeftCorner(3, 3) = transformLastMapped.topLeftCorner(3, 3) * delta_Rl;
           tc.tic();
           Estimate(kframe);
           t1 = tc.toc();
@@ -665,6 +719,7 @@ public:
         t3 = tc.toc();
         std::cout << "LIO takes: " << t1 << ",pubodom:" << t2 << ",mapincrement:" << t3 << std::endl;
       }
+      time_last_lidar = time_curr_lidar; // ros::Time().fromSec(kframe.time); //  update time
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
@@ -699,6 +754,58 @@ public:
     ds_corner_.setInputCloud(kf.corner);
     ds_corner_.filter(*kf.corner);
     std::cout << "aft-surf: " << kf.surf->size() << ",corner: " << kf.corner->size() << std::endl;
+  }
+
+  bool fetchImuMsgs(double startTime, double endTime, std::vector<sensor_msgs::ImuConstPtr> &vimuMsg)
+  {
+    double current_time = 0;
+    vimuMsg.clear();
+    while (true)
+    {
+      if (_imuMsgQueue.empty())
+        break;
+      if (_imuMsgQueue.back()->header.stamp.toSec() < endTime ||
+          _imuMsgQueue.front()->header.stamp.toSec() >= endTime)
+        break;
+      sensor_msgs::ImuConstPtr tmpimumsg = _imuMsgQueue.front();
+      double time = tmpimumsg->header.stamp.toSec();
+      if (time <= endTime && time > startTime)
+      {
+        vimuMsg.push_back(tmpimumsg);
+        current_time = time;
+        _imuMsgQueue.pop_front();
+        if (time == endTime)
+          break;
+      }
+      else
+      {
+        if (time <= startTime)
+        {
+          _imuMsgQueue.pop_front();
+        }
+        else
+        {
+          double dt_1 = endTime - current_time;
+          double dt_2 = time - endTime;
+          ROS_ASSERT(dt_1 >= 0);
+          ROS_ASSERT(dt_2 >= 0);
+          ROS_ASSERT(dt_1 + dt_2 > 0);
+          double w1 = dt_2 / (dt_1 + dt_2);
+          double w2 = dt_1 / (dt_1 + dt_2);
+          sensor_msgs::ImuPtr theLastIMU(new sensor_msgs::Imu);
+          theLastIMU->linear_acceleration.x = w1 * vimuMsg.back()->linear_acceleration.x + w2 * tmpimumsg->linear_acceleration.x;
+          theLastIMU->linear_acceleration.y = w1 * vimuMsg.back()->linear_acceleration.y + w2 * tmpimumsg->linear_acceleration.y;
+          theLastIMU->linear_acceleration.z = w1 * vimuMsg.back()->linear_acceleration.z + w2 * tmpimumsg->linear_acceleration.z;
+          theLastIMU->angular_velocity.x = w1 * vimuMsg.back()->angular_velocity.x + w2 * tmpimumsg->angular_velocity.x;
+          theLastIMU->angular_velocity.y = w1 * vimuMsg.back()->angular_velocity.y + w2 * tmpimumsg->angular_velocity.y;
+          theLastIMU->angular_velocity.z = w1 * vimuMsg.back()->angular_velocity.z + w2 * tmpimumsg->angular_velocity.z;
+          theLastIMU->header.stamp.fromSec(endTime);
+          vimuMsg.emplace_back(theLastIMU);
+          break;
+        }
+      }
+    }
+    return !vimuMsg.empty();
   }
 
   void processPointToLine(std::vector<ceres::CostFunction *> &edges,
