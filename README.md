@@ -16,18 +16,27 @@ This repository is a Lidar-IMU Localization System with Prior Map Constraint and
 
 
 
-  - A Modified Tightly coupled Lidar-imu laserodometry [LIO-Livox-modified](https://github.com/chengwei0427/LIO-Livox-modified);
-  - A Lidar-IMU Localization System with Prior Map Constraint and Lio Constraint for 3D LiDAR;
+  * Mapping Moudle
+    - A Modified FeatureExtract Function adapt for traditional spinning lidar,such as velodyne,ouster,robosense etc. ;
+    - A Modified Tightly coupled Lidar-imu laserodometry [LIO-Livox-modified](https://github.com/chengwei0427/LIO-Livox-modified);
+  * Localization Moudle
+    - A Lidar-IMU Localization System with Prior Map Constraint and Lio Constraint for 3D LiDAR;
+    - Three IMU_Mode: 0-without using IMU, 1-loose couple IMU and Lidar, 2-tightly coupled IMU and LiDAR;
+    - Automatic switch Map-Location mode and LIO-Location mode;
 
 
-## demo
-
-[video-bilibili](https://www.bilibili.com/video/BV1hT411M7cN?spm_id_from=333.999.0.0&vd_source=438f630fe29bd5049b24c7f05b1bcaa3)
+# demo
 
 
 <div align="center">
-<img src="./doc/demo.png" width="1000px">
+<img src="./doc/lio-localization.gif" width="1000px">
 </div>
+<p align='center'>
+    <img src="./doc/lio_xyz.png" alt="drawing" width="420"/>
+    <img src="./doc/lio_rpy.png" alt="drawing" width="420"/>
+</p>
+
+A test video of the dataset can be found on [BiliBili](https://www.bilibili.com/video/BV1hT411M7cN?spm_id_from=333.999.0.0&vd_source=438f630fe29bd5049b24c7f05b1bcaa3)
 
 
 ## Prerequisites
@@ -51,7 +60,7 @@ cd ..
 catkin_make
 ```
 
-## Run with bag files:
+## Run with bag 
 
 (1) generate global map with [LIO-SAM-modified](https://github.com/chengwei0427/LIO-SAM-modified)
 
@@ -81,7 +90,7 @@ rosbag play yourbagname.bag --clock
 Set initial pose in rviz
 ```
 
-## Notes:
+## Notes
 
 The current version of the system is just a demo and we haven't done enough tests.
 
@@ -97,6 +106,7 @@ There are some parameters in params.yaml files:
 
   - [ ] support tightly coupling IMU and LiDAR in Localization moudle
   - [ ] estimated positioning accuracy
+  - [ ] abnormal check
   - [x] add test video
   - [x] add demo example
 
