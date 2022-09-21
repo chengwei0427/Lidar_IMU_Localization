@@ -824,8 +824,8 @@ public:
           std::cout << ANSI_COLOR_GREEN << "icp scan match successful ..." << ANSI_COLOR_RESET << std::endl;
         }
 
-        transformLastMapped.topLeftCorner(3, 3) = lidarFrame.Q.toRotationMatrix();
-        transformLastMapped.topRightCorner(3, 1) = lidarFrame.P;
+        transformLastMapped.topLeftCorner(3, 3) = lidar_list->front().Q.toRotationMatrix();
+        transformLastMapped.topRightCorner(3, 1) = lidar_list->front().P;
 
         pubOdometry(transformLastMapped, lidar_list->front().timeStamp);
       }
