@@ -61,7 +61,7 @@ public:
     // Topics
     string pointCloudTopic;
     // Frames
-    string lidarFrame;
+    string lidarFrameStr;
 
     // Lidar Sensor Configuration
     SensorType sensor;
@@ -119,7 +119,7 @@ public:
     FeatureExtract()
     {
         nh.param<std::string>("common/pointCloudTopic", pointCloudTopic, "points_raw");
-        nh.param<std::string>("feature_extract/lidarFrame", lidarFrame, "base_link");
+        nh.param<std::string>("feature_extract/lidarFrame", lidarFrameStr, "base_link");
 
         std::string sensorStr;
         nh.param<std::string>("feature_extract/sensor", sensorStr, "");
@@ -650,10 +650,10 @@ public:
         // free cloud info memory
         freeCloudInfoMemory();
         // save newly extracted features
-        cloudInfo.cloud_corner = publishCloud(&pubCornerPoints, cornerCloud, cloudHeader.stamp, lidarFrame);
-        cloudInfo.cloud_surface = publishCloud(&pubSurfacePoints, surfaceCloud, cloudHeader.stamp, lidarFrame);
+        cloudInfo.cloud_corner = publishCloud(&pubCornerPoints, cornerCloud, cloudHeader.stamp, lidarFrameStr);
+        cloudInfo.cloud_surface = publishCloud(&pubSurfacePoints, surfaceCloud, cloudHeader.stamp, lidarFrameStr);
         cloudHeader.stamp = ros::Time().fromSec(timeScanEnd); // lio used
-        publishCloud(&pubFullPoints, extractedCloud, cloudHeader.stamp, lidarFrame);
+        publishCloud(&pubFullPoints, extractedCloud, cloudHeader.stamp, lidarFrameStr);
         // publish to mapOptimization
         pubLaserCloudInfo.publish(cloudInfo);
     }
