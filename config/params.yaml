@@ -41,5 +41,5 @@ location:
   imuTopic: "/imu/data"
   IMU_Mode: 2
   use_lio: false
-  corner_leaf_: 0.4
-  surf_leaf_: 0.5
+  corner_leaf_: 0.5
+  surf_leaf_: 1.0

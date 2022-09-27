@@ -23,10 +23,8 @@ This repository is a Lidar-IMU Localization System with Prior Map Constraint and
     - A Lidar-IMU Localization System with Prior Map Constraint and Lio Constraint for 3D LiDAR;
     - Three IMU_Mode: 0-without using IMU, 1-loose couple IMU and Lidar, 2-tightly coupled IMU and LiDAR;
     - Automatic switch Map-Location mode and LIO-Location mode;
+   
 
-update 2022-09-21
-
-**The Tightly Coupled Lidar-imu will upload before October 1st**
 
 # demo
 
@@ -106,14 +104,15 @@ There are some parameters in params.yaml files:
 *  IMU_Mode: choose IMU information fusion strategy, there are 3 modes:
     -  0 - without using IMU information, pure LiDAR odometry, motion distortion is removed using a constant velocity model (added 2022-09-16)
     -  1 - using IMU preintegration to remove motion distortion (added 2022-09-19)
-    -  2 - **tightly coupling IMU and LiDAR information (will support later)**
+    -  2 - **tightly coupling IMU and LiDAR information (added 2022-09-27)**
 
 
 ## TODO
 
-  - [ ] support tightly coupling IMU and LiDAR in Localization moudle
+  - [x] support tightly coupling IMU and LiDAR in Localization moudle
   - [ ] estimated positioning accuracy
   - [ ] abnormal check
+  - [ ] Lio and Map constraint weight
   - [x] add test video
   - [x] add demo example
 
