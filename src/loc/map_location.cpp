@@ -198,6 +198,7 @@ private:
   std::string pointCloudTopic;
   std::string imu_topic;
   int IMU_Mode = 0;
+  bool use_lio = false;
   double corner_leaf_;
   double surf_leaf_;
 
@@ -222,14 +223,22 @@ private:
 
   PointTypePose initpose;
 
+  Eigen::Vector3d GravityVector;
+
+  int pushCount = 0;
+  double startTime = 0;
   int WINDOWSIZE;
   bool LidarIMUInited = false;
   boost::shared_ptr<std::list<LidarFrame>> lidarFrameList;
+  std::string root_dir = ROOT_DIR;
 
   MAP_MANAGER *map_manager;
   static const int SLIDEWINDOWSIZE = 2;
   double para_PR[SLIDEWINDOWSIZE][6];
   double para_VBias[SLIDEWINDOWSIZE][9];
+  MarginalizationInfo *last_marginalization_info = nullptr;
+  std::vector<double *> last_marginalization_parameter_blocks;
+
   Eigen::Matrix4d exTlb = Eigen::Matrix4d::Identity();
   double thres_dist = 1.0;
   double plan_weight_tan = 0.0;
@@ -251,13 +260,17 @@ public:
     nh_.param<std::string>("location/pointCloudTopic", pointCloudTopic, "points_raw");
     nh_.param<std::string>("location/imuTopic", imu_topic, "/livox/imu");
     nh_.param<int>("location/IMU_Mode", IMU_Mode, 0);
+    nh_.param<bool>("location/use_lio", use_lio, false);
     nh_.param<double>("location/corner_leaf_", corner_leaf_, 0.2);
     nh_.param<double>("location/surf_leaf_", surf_leaf_, 0.5);
 
     sub_cloud_ = nh_.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 50, &map_location::cloudHandler, this);
     if (IMU_Mode > 0)
       sub_imu_ = nh_.subscribe(imu_topic, 2000, &map_location::imu_callback, this);
-
+    if (IMU_Mode < 2)
+      WINDOWSIZE = 1;
+    else
+      WINDOWSIZE = 20;
     sub_initial_pose_ = nh_.subscribe<geometry_msgs::PoseWithCovarianceStamped>("/initialpose", 1, &map_location::initialPoseCB, this);
 
     pub_corner_map = nh_.advertise<sensor_msgs::PointCloud2>("/global_corner_map", 1);
@@ -276,6 +289,11 @@ public:
       std::cout << ANSI_COLOR_RED_BOLD << "WARN: load map failed." << ANSI_COLOR_RESET << std::endl;
       return;
     }
+
+    std::cout << "ROOT_DIR: " << root_dir << std::endl;
+    //  create folder
+    std::string command = "mkdir -p " + root_dir + "Log";
+    system(command.c_str());
 
     surround_surf.reset(new CLOUD);
     surround_corner.reset(new CLOUD);
@@ -310,6 +328,7 @@ public:
     laserCloudSurfFromLocal.reset(new pcl::PointCloud<PointType>);
 
     map_manager = new MAP_MANAGER(0.2, 0.3);
+    lidarFrameList.reset(new std::list<LidarFrame>);
   }
   ~map_location();
 
@@ -365,7 +384,8 @@ public:
     p.x = initpose.x;
     p.y = initpose.y;
     p.z = initpose.z;
-    std::cout << ANSI_COLOR_RED << "Get initial pose: " << initpose.x << " " << initpose.y << " " << initpose.z << ANSI_COLOR_RESET << std::endl;
+    std::cout << ANSI_COLOR_RED << "Get initial pose: " << initpose.x << " " << initpose.y << " "
+              << initpose.z << " " << roll << " " << pitch << " " << yaw << ANSI_COLOR_RESET << std::endl;
     extractSurroundKeyFrames(p);
     std::cout << ANSI_COLOR_YELLOW << "Change flat from " << initializedFlag
               << " to " << Initializing << ", start do localizating ..."
@@ -380,6 +400,8 @@ public:
         localSurfMap[i]->clear();
       }
       localMapID = 0;
+      laserCloudCornerFromLocal->clear();
+      laserCloudSurfFromLocal->clear();
     }
     initializedFlag = Initializing;
   }
@@ -441,10 +463,10 @@ public:
     pubLaserOdometryPath_.publish(laserOdoPath);
   }
 
-  void vector2double(const std::list<LidarFrame> &lidarFrameList)
+  void vector2double(const std::list<LidarFrame> &tempFrameList)
   {
     int i = 0;
-    for (const auto &l : lidarFrameList)
+    for (const auto &l : tempFrameList)
     {
       Eigen::Map<Eigen::Matrix<double, 6, 1>> PR(para_PR[i]);
       PR.segment<3>(0) = l.P;
@@ -458,10 +480,10 @@ public:
     }
   }
 
-  void double2vector(std::list<LidarFrame> &lidarFrameList)
+  void double2vector(std::list<LidarFrame> &tempFrameList)
   {
     int i = 0;
-    for (auto &l : lidarFrameList)
+    for (auto &l : tempFrameList)
     {
       Eigen::Map<const Eigen::Matrix<double, 6, 1>> PR(para_PR[i]);
       Eigen::Map<const Eigen::Matrix<double, 9, 1>> VBias(para_VBias[i]);
@@ -474,17 +496,26 @@ public:
     }
   }
 
-  void Estimate(std::list<LidarFrame> &frameList)
+  void Estimate(std::list<LidarFrame> &frameList, const Eigen::Vector3d &gravity)
   {
+    TicToc etc;
     int num_corner_map = 0;
     int num_surf_map = 0;
-    int windowSize = 1;
+    int windowSize = frameList.size();
+    double t_kd = 0, t_ext = 0;
+    etc.tic();
+    if (use_lio)
+    {
+      kdtree_corner_localmap->setInputCloud(laserCloudCornerFromLocal);
+      kdtree_surf_localmap->setInputCloud(laserCloudSurfFromLocal);
+    }
+    t_kd = etc.toc();
 
-    kdtree_corner_localmap->setInputCloud(laserCloudCornerFromLocal);
-    kdtree_surf_localmap->setInputCloud(laserCloudSurfFromLocal);
-
+    etc.tic();
     for (auto &frame : frameList)
       ExtractFeature(frame);
+    t_ext = etc.toc();
+    std::cout << "make kd-tree: " << t_kd << "ms, extract feature: " << t_ext << "ms" << std::endl;
 
     // store point to line features
     std::vector<std::vector<FeatureLine>> vLineFeatures(windowSize);
@@ -512,6 +543,7 @@ public:
     int iterOpt = 0;
     for (; iterOpt < max_iters; ++iterOpt)
     {
+      double t_search = 0, t_ass = 0, t_solve = 0, t_marg = 0;
       vector2double(frameList);
 
       // create huber loss function
@@ -538,6 +570,29 @@ public:
         problem.AddParameterBlock(para_VBias[i], 9);
 
       //  TODO: add imu here
+      for (int f = 1; f < windowSize; ++f)
+      {
+        auto frame_curr = frameList.begin();
+        std::advance(frame_curr, f);
+        problem.AddResidualBlock(Cost_NavState_PRV_Bias::Create(frame_curr->imuIntegrator,
+                                                                const_cast<Eigen::Vector3d &>(gravity),
+                                                                Eigen::LLT<Eigen::Matrix<double, 15, 15>>(frame_curr->imuIntegrator.GetCovariance().inverse())
+                                                                    .matrixL()
+                                                                    .transpose()),
+                                 nullptr,
+                                 para_PR[f - 1],
+                                 para_VBias[f - 1],
+                                 para_PR[f],
+                                 para_VBias[f]);
+      }
+
+      if (last_marginalization_info)
+      {
+        // construct new marginlization_factor
+        auto *marginalization_factor = new MarginalizationFactor(last_marginalization_info);
+        problem.AddResidualBlock(marginalization_factor, nullptr,
+                                 last_marginalization_parameter_blocks);
+      }
 
       Eigen::Quaterniond q_before_opti = frameList.back().Q;
       Eigen::Vector3d t_before_opti = frameList.back().P;
@@ -545,6 +600,8 @@ public:
       std::vector<std::vector<ceres::CostFunction *>> edgesLine(windowSize);
       std::vector<std::vector<ceres::CostFunction *>> edgesPlan(windowSize);
       std::thread threads[2];
+
+      etc.tic();
       for (int f = 0; f < windowSize; ++f)
       {
         auto frame_curr = frameList.begin();
@@ -578,7 +635,9 @@ public:
         threads[0].join();
         threads[1].join();
       }
+      t_search = etc.toc();
 
+      etc.tic();
       if (windowSize == SLIDEWINDOWSIZE)
       {
         thres_dist = 1.0;
@@ -684,15 +743,18 @@ public:
           }
         }
       }
+      t_ass = etc.toc();
 
       ceres::Solver::Options options;
       options.linear_solver_type = ceres::DENSE_SCHUR;
       options.trust_region_strategy_type = ceres::DOGLEG;
-      options.max_num_iterations = 10;
+      options.max_num_iterations = 5;
       options.minimizer_progress_to_stdout = false;
       options.num_threads = 6;
       ceres::Solver::Summary summary;
+      etc.tic();
       ceres::Solve(options, &problem, &summary);
+      t_solve = etc.toc();
 
       double2vector(frameList);
 
@@ -701,11 +763,115 @@ public:
 
       double deltaR = (q_before_opti.angularDistance(q_after_opti)) * 180.0 / M_PI;
       double deltaT = (t_before_opti - t_after_opti).norm();
-
+      std::cout << "make ass takes: " << t_search << "ms,ass takes: " << t_ass << "ms, solve takes: " << t_solve << std::endl;
       if (deltaR < 0.05 && deltaT < 0.05 || (iterOpt + 1) == max_iters)
       {
         if (windowSize != SLIDEWINDOWSIZE)
           break;
+        etc.tic();
+        auto *marginalization_info = new MarginalizationInfo();
+        if (last_marginalization_info)
+        {
+          std::vector<int> drop_set;
+          for (int i = 0; i < static_cast<int>(last_marginalization_parameter_blocks.size()); i++)
+          {
+            if (last_marginalization_parameter_blocks[i] == para_PR[0] ||
+                last_marginalization_parameter_blocks[i] == para_VBias[0])
+              drop_set.push_back(i);
+          }
+
+          auto *marginalization_factor = new MarginalizationFactor(last_marginalization_info);
+          auto *residual_block_info = new ResidualBlockInfo(marginalization_factor, nullptr,
+                                                            last_marginalization_parameter_blocks,
+                                                            drop_set);
+          marginalization_info->addResidualBlockInfo(residual_block_info);
+        }
+
+        auto frame_curr = frameList.begin();
+        std::advance(frame_curr, 1);
+        ceres::CostFunction *IMU_Cost = Cost_NavState_PRV_Bias::Create(frame_curr->imuIntegrator,
+                                                                       const_cast<Eigen::Vector3d &>(gravity),
+                                                                       Eigen::LLT<Eigen::Matrix<double, 15, 15>>(frame_curr->imuIntegrator.GetCovariance().inverse())
+                                                                           .matrixL()
+                                                                           .transpose());
+        auto *residual_block_info = new ResidualBlockInfo(IMU_Cost, nullptr,
+                                                          std::vector<double *>{para_PR[0], para_VBias[0], para_PR[1], para_VBias[1]},
+                                                          std::vector<int>{0, 1});
+        marginalization_info->addResidualBlockInfo(residual_block_info);
+
+        int f = 0;
+        Eigen::Matrix4d transformTobeMapped = Eigen::Matrix4d::Identity();
+        transformTobeMapped.topLeftCorner(3, 3) = frame_curr->Q.toRotationMatrix();
+        transformTobeMapped.topRightCorner(3, 1) = frame_curr->P;
+        edgesLine[f].clear();
+        edgesPlan[f].clear();
+        threads[0] = std::thread(&map_location::processPointToLine, this,
+                                 std::ref(edgesLine[f]),
+                                 std::ref(vLineFeatures[f]),
+                                 std::ref(frame_curr->corner),
+                                 std::ref(map.globalCornerMapCloud_),
+                                 std::ref(kdtree_corner_map),
+                                 std::ref(laserCloudCornerFromLocal),
+                                 std::ref(kdtree_corner_localmap),
+                                 std::ref(exTlb),
+                                 std::ref(transformTobeMapped));
+
+        threads[1] = std::thread(&map_location::processPointToPlanVec, this,
+                                 std::ref(edgesPlan[f]),
+                                 std::ref(vPlanFeatures[f]),
+                                 std::ref(frame_curr->surf),
+                                 std::ref(map.globalSurfMapCloud_),
+                                 std::ref(kdtree_surf_map),
+                                 std::ref(laserCloudSurfFromLocal),
+                                 std::ref(kdtree_surf_localmap),
+                                 std::ref(exTlb),
+                                 std::ref(transformTobeMapped));
+
+        threads[0].join();
+        threads[1].join();
+
+        int cntFtu = 0;
+        for (auto &e : edgesLine[f])
+        {
+          if (vLineFeatures[f][cntFtu].valid)
+          {
+            auto *residual_block_info = new ResidualBlockInfo(e, nullptr,
+                                                              std::vector<double *>{para_PR[0]},
+                                                              std::vector<int>{0});
+            marginalization_info->addResidualBlockInfo(residual_block_info);
+          }
+          cntFtu++;
+        }
+        cntFtu = 0;
+        for (auto &e : edgesPlan[f])
+        {
+          if (vPlanFeatures[f][cntFtu].valid)
+          {
+            auto *residual_block_info = new ResidualBlockInfo(e, nullptr,
+                                                              std::vector<double *>{para_PR[0]},
+                                                              std::vector<int>{0});
+            marginalization_info->addResidualBlockInfo(residual_block_info);
+          }
+          cntFtu++;
+        }
+
+        marginalization_info->preMarginalize();
+        marginalization_info->marginalize();
+
+        std::unordered_map<long, double *> addr_shift;
+        for (int i = 1; i < SLIDEWINDOWSIZE; i++)
+        {
+          addr_shift[reinterpret_cast<long>(para_PR[i])] = para_PR[i - 1];
+          addr_shift[reinterpret_cast<long>(para_VBias[i])] = para_VBias[i - 1];
+        }
+        std::vector<double *> parameter_blocks = marginalization_info->getParameterBlocks(addr_shift);
+
+        delete last_marginalization_info;
+        last_marginalization_info = marginalization_info;
+        last_marginalization_parameter_blocks = parameter_blocks;
+        t_marg = etc.toc();
+        std::cout << "marg takes:" << t_marg << "ms" << std::endl;
+        break;
       }
       if (windowSize != SLIDEWINDOWSIZE)
       {
@@ -790,6 +956,39 @@ public:
         }
         else
         {
+          // if get IMU msg successfully, use pre-integration to update delta lidar pose
+          lidarFrame.imuIntegrator.PushIMUMsg(vimuMsg);
+          lidarFrame.imuIntegrator.PreIntegration(lidarFrameList->back().timeStamp, lidarFrameList->back().bg, lidarFrameList->back().ba);
+
+          const Eigen::Vector3d &Pwbpre = lidarFrameList->back().P;
+          const Eigen::Quaterniond &Qwbpre = lidarFrameList->back().Q;
+          const Eigen::Vector3d &Vwbpre = lidarFrameList->back().V;
+
+          const Eigen::Quaterniond &dQ = lidarFrame.imuIntegrator.GetDeltaQ();
+          const Eigen::Vector3d &dP = lidarFrame.imuIntegrator.GetDeltaP();
+          const Eigen::Vector3d &dV = lidarFrame.imuIntegrator.GetDeltaV();
+          double dt = lidarFrame.imuIntegrator.GetDeltaTime();
+
+          lidarFrame.Q = Qwbpre * dQ;
+          lidarFrame.P = Pwbpre + Vwbpre * dt + 0.5 * GravityVector * dt * dt + Qwbpre * (dP);
+          lidarFrame.V = Vwbpre + GravityVector * dt + Qwbpre * (dV);
+          lidarFrame.bg = lidarFrameList->back().bg;
+          lidarFrame.ba = lidarFrameList->back().ba;
+
+          Eigen::Quaterniond Qwlpre = Qwbpre;
+          Eigen::Vector3d Pwlpre = Pwbpre;
+
+          Eigen::Quaterniond Qwl = lidarFrame.Q;
+          Eigen::Vector3d Pwl = lidarFrame.P;
+
+          delta_Rl = Qwlpre.conjugate() * Qwl;
+          delta_tl = Qwlpre.conjugate() * (Pwl - Pwlpre);
+          // delta_Rb = dQ.toRotationMatrix();
+          // delta_tb = dP;
+
+          lidarFrameList->push_back(lidarFrame);
+          lidarFrameList->pop_front();
+          lidar_list = lidarFrameList;
         }
       }
       else
@@ -832,6 +1031,7 @@ public:
       else if (initializedFlag == Initialized)
       {
         TicToc tc;
+        Eigen::Matrix4d transformAftMapped = Eigen::Matrix4d::Identity();
         double t1, t2, t3;
         //  TODO: 增加局部地图
         int laserCloudCornerFromLocalNum = laserCloudCornerFromLocal->points.size();
@@ -840,11 +1040,11 @@ public:
             (laserCloudCornerFromLocalNum > 0 && laserCloudSurfFromLocalNum > 100))
         {
           tc.tic();
-          Estimate(*lidar_list);
+          Estimate(*lidar_list, GravityVector);
           t1 = tc.toc();
           tc.tic();
 
-          Eigen::Matrix4d transformAftMapped = Eigen::Matrix4d::Identity();
+          transformAftMapped = Eigen::Matrix4d::Identity();
           transformAftMapped.topLeftCorner(3, 3) = lidar_list->front().Q.toRotationMatrix();
           transformAftMapped.topRightCorner(3, 1) = lidar_list->front().P;
           pubOdometry(transformAftMapped, lidar_list->front().timeStamp);
@@ -857,13 +1057,292 @@ public:
           t2 = tc.toc();
         }
         tc.tic();
-        MapIncrementLocal(lidar_list->front());
+        laserCloudCornerFromLocal->clear();
+        laserCloudSurfFromLocal->clear();
+        if (use_lio)
+          MapIncrementLocal(lidar_list->front());
         t3 = tc.toc();
         std::cout << "LIO takes: " << t1 << ",pubodom:" << t2 << ",mapincrement:" << t3 << std::endl;
+#define SAVE_TRAJ
+
+#ifdef SAVE_TRAJ
+        if (1)
+        {
+          static std::fstream fout(root_dir + "Log/odom_trajectory_TUM.txt", std::ios::out);
+          static std::ostringstream stamp;
+          stamp.str("");
+          if (fout.is_open())
+          {
+            // std::string tstamp = to_string(ros::Time().fromSec(laser_odometry->time));
+            std::string tstamp = std::to_string(lidar_list->front().timeStamp);
+            saveTrajectoryTUMformat(fout, tstamp, lidar_list->front().P(0), lidar_list->front().P(1), lidar_list->front().P(2),
+                                    lidar_list->front().Q.x(), lidar_list->front().Q.y(), lidar_list->front().Q.z(), lidar_list->front().Q.w());
+          }
+        }
+#endif
+
+        // if tightly coupled IMU message, start IMU initialization
+        if (IMU_Mode > 1 && !LidarIMUInited)
+        {
+          // update lidar frame pose
+          lidarFrame.P = transformAftMapped.topRightCorner(3, 1);
+          Eigen::Matrix3d m3d = transformAftMapped.topLeftCorner(3, 3);
+          lidarFrame.Q = m3d;
+
+          // static int pushCount = 0;
+          std::cout << "lidarframelist: " << lidarFrameList->size() << std::endl;
+          if (pushCount == 0)
+          {
+            lidarFrameList->push_back(lidarFrame);
+            lidarFrameList->back().imuIntegrator.Reset();
+            if (lidarFrameList->size() > WINDOWSIZE)
+              lidarFrameList->pop_front();
+          }
+          else
+          {
+            lidarFrameList->back().laserCloud = lidarFrame.laserCloud;
+            lidarFrameList->back().imuIntegrator.PushIMUMsg(vimuMsg);
+            lidarFrameList->back().timeStamp = lidarFrame.timeStamp;
+            lidarFrameList->back().P = lidarFrame.P;
+            lidarFrameList->back().Q = lidarFrame.Q;
+          }
+          std::cout << "lidarframelist: " << lidarFrameList->size() << std::endl;
+
+          pushCount++;
+          if (pushCount >= 3)
+          {
+            pushCount = 0;
+            if (lidarFrameList->size() > 1)
+            {
+              auto iterRight = std::prev(lidarFrameList->end());
+              auto iterLeft = std::prev(std::prev(lidarFrameList->end()));
+              iterRight->imuIntegrator.PreIntegration(iterLeft->timeStamp, iterLeft->bg, iterLeft->ba);
+            }
+
+            if (lidarFrameList->size() == int(WINDOWSIZE / 1.5))
+            {
+              startTime = lidarFrameList->back().timeStamp;
+            }
+
+            if (!LidarIMUInited && lidarFrameList->size() == WINDOWSIZE && lidarFrameList->front().timeStamp >= startTime)
+            {
+              std::cout << "**************Start MAP Initialization!!!******************" << std::endl;
+              if (TryMAPInitialization())
+              {
+                LidarIMUInited = true;
+                pushCount = 0;
+                startTime = 0;
+              }
+              std::cout << "**************Finish MAP Initialization!!!******************" << std::endl;
+            }
+          }
+        }
       }
+
       time_last_lidar = time_curr_lidar; //  update time
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+  }
+
+  bool TryMAPInitialization()
+  {
+
+    Eigen::Vector3d average_acc = -lidarFrameList->begin()->imuIntegrator.GetAverageAcc();
+    double info_g = std::fabs(9.805 - average_acc.norm());
+    average_acc = average_acc * 9.805 / average_acc.norm();
+
+    // calculate the initial gravity direction
+    double para_quat[4];
+    para_quat[0] = 1;
+    para_quat[1] = 0;
+    para_quat[2] = 0;
+    para_quat[3] = 0;
+
+    ceres::LocalParameterization *quatParam = new ceres::QuaternionParameterization();
+    ceres::Problem problem_quat;
+
+    problem_quat.AddParameterBlock(para_quat, 4, quatParam);
+
+    problem_quat.AddResidualBlock(Cost_Initial_G::Create(average_acc),
+                                  nullptr,
+                                  para_quat);
+
+    ceres::Solver::Options options_quat;
+    ceres::Solver::Summary summary_quat;
+    ceres::Solve(options_quat, &problem_quat, &summary_quat);
+
+    Eigen::Quaterniond q_wg(para_quat[0], para_quat[1], para_quat[2], para_quat[3]);
+
+    // build prior factor of LIO initialization
+    Eigen::Vector3d prior_r = Eigen::Vector3d::Zero();
+    Eigen::Vector3d prior_ba = Eigen::Vector3d::Zero();
+    Eigen::Vector3d prior_bg = Eigen::Vector3d::Zero();
+    std::vector<Eigen::Vector3d> prior_v;
+    int v_size = lidarFrameList->size();
+    for (int i = 0; i < v_size; i++)
+    {
+      prior_v.push_back(Eigen::Vector3d::Zero());
+    }
+    Sophus::SO3d SO3_R_wg(q_wg.toRotationMatrix());
+    prior_r = SO3_R_wg.log();
+
+    for (int i = 1; i < v_size; i++)
+    {
+      auto iter = lidarFrameList->begin();
+      auto iter_next = lidarFrameList->begin();
+      std::advance(iter, i - 1);
+      std::advance(iter_next, i);
+
+      Eigen::Vector3d velo_imu = (iter_next->P - iter->P) / (iter_next->timeStamp - iter->timeStamp);
+      prior_v[i] = velo_imu;
+    }
+    prior_v[0] = prior_v[1];
+
+    double para_v[v_size][3];
+    double para_r[3];
+    double para_ba[3];
+    double para_bg[3];
+
+    for (int i = 0; i < 3; i++)
+    {
+      para_r[i] = 0;
+      para_ba[i] = 0;
+      para_bg[i] = 0;
+    }
+
+    for (int i = 0; i < v_size; i++)
+    {
+      for (int j = 0; j < 3; j++)
+      {
+        para_v[i][j] = prior_v[i][j];
+      }
+    }
+
+    Eigen::Matrix<double, 3, 3> sqrt_information_r = 2000.0 * Eigen::Matrix<double, 3, 3>::Identity();
+    Eigen::Matrix<double, 3, 3> sqrt_information_ba = 1000.0 * Eigen::Matrix<double, 3, 3>::Identity();
+    Eigen::Matrix<double, 3, 3> sqrt_information_bg = 4000.0 * Eigen::Matrix<double, 3, 3>::Identity();
+    Eigen::Matrix<double, 3, 3> sqrt_information_v = 4000.0 * Eigen::Matrix<double, 3, 3>::Identity();
+
+    ceres::Problem::Options problem_options;
+    ceres::Problem problem(problem_options);
+    problem.AddParameterBlock(para_r, 3);
+    problem.AddParameterBlock(para_ba, 3);
+    problem.AddParameterBlock(para_bg, 3);
+    for (int i = 0; i < v_size; i++)
+    {
+      problem.AddParameterBlock(para_v[i], 3);
+    }
+
+    // add CostFunction
+    problem.AddResidualBlock(Cost_Initialization_Prior_R::Create(prior_r, sqrt_information_r),
+                             nullptr,
+                             para_r);
+
+    problem.AddResidualBlock(Cost_Initialization_Prior_bv::Create(prior_ba, sqrt_information_ba),
+                             nullptr,
+                             para_ba);
+    problem.AddResidualBlock(Cost_Initialization_Prior_bv::Create(prior_bg, sqrt_information_bg),
+                             nullptr,
+                             para_bg);
+
+    for (int i = 0; i < v_size; i++)
+    {
+      problem.AddResidualBlock(Cost_Initialization_Prior_bv::Create(prior_v[i], sqrt_information_v),
+                               nullptr,
+                               para_v[i]);
+    }
+
+    for (int i = 1; i < v_size; i++)
+    {
+      auto iter = lidarFrameList->begin();
+      auto iter_next = lidarFrameList->begin();
+      std::advance(iter, i - 1);
+      std::advance(iter_next, i);
+
+      Eigen::Vector3d pi = iter->P;
+      Sophus::SO3d SO3_Ri(iter->Q);
+      Eigen::Vector3d ri = SO3_Ri.log();
+      Eigen::Vector3d pj = iter_next->P;
+      Sophus::SO3d SO3_Rj(iter_next->Q);
+      Eigen::Vector3d rj = SO3_Rj.log();
+
+      problem.AddResidualBlock(Cost_Initialization_IMU::Create(iter_next->imuIntegrator,
+                                                               ri,
+                                                               rj,
+                                                               pj - pi,
+                                                               Eigen::LLT<Eigen::Matrix<double, 9, 9>>(iter_next->imuIntegrator.GetCovariance().block<9, 9>(0, 0).inverse())
+                                                                   .matrixL()
+                                                                   .transpose()),
+                               nullptr,
+                               para_r,
+                               para_v[i - 1],
+                               para_v[i],
+                               para_ba,
+                               para_bg);
+    }
+
+    ceres::Solver::Options options;
+    options.minimizer_progress_to_stdout = false;
+    options.linear_solver_type = ceres::DENSE_QR;
+    options.num_threads = 6;
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+
+    Eigen::Vector3d r_wg(para_r[0], para_r[1], para_r[2]);
+    GravityVector = Sophus::SO3d::exp(r_wg) * Eigen::Vector3d(0, 0, -9.805);
+
+    Eigen::Vector3d ba_vec(para_ba[0], para_ba[1], para_ba[2]);
+    Eigen::Vector3d bg_vec(para_bg[0], para_bg[1], para_bg[2]);
+
+    std::cout << "after opt,ba:" << ba_vec.transpose() << ",bg: " << bg_vec.transpose()
+              << ",g: " << GravityVector.transpose() << std::endl;
+
+    if (ba_vec.norm() > 0.5 || bg_vec.norm() > 0.5)
+    {
+      ROS_WARN("Too Large Biases! Initialization Failed!");
+      return false;
+    }
+
+    for (int i = 0; i < v_size; i++)
+    {
+      auto iter = lidarFrameList->begin();
+      std::advance(iter, i);
+      iter->ba = ba_vec;
+      iter->bg = bg_vec;
+      Eigen::Vector3d bv_vec(para_v[i][0], para_v[i][1], para_v[i][2]);
+      if ((bv_vec - prior_v[i]).norm() > 2.0)
+      {
+        ROS_WARN("Too Large Velocity! Initialization Failed!");
+        std::cout << "delta v norm: " << (bv_vec - prior_v[i]).norm() << std::endl;
+        return false;
+      }
+      iter->V = bv_vec;
+    }
+
+    for (size_t i = 0; i < v_size - 1; i++)
+    {
+      auto laser_trans_i = lidarFrameList->begin();
+      auto laser_trans_j = lidarFrameList->begin();
+      std::advance(laser_trans_i, i);
+      std::advance(laser_trans_j, i + 1);
+      laser_trans_j->imuIntegrator.PreIntegration(laser_trans_i->timeStamp, laser_trans_i->bg, laser_trans_i->ba);
+    }
+
+    // //if IMU success initialized
+    WINDOWSIZE = SLIDEWINDOWSIZE;
+    while (lidarFrameList->size() > WINDOWSIZE)
+    {
+      lidarFrameList->pop_front();
+    }
+    Eigen::Vector3d Pwl = lidarFrameList->back().P;
+    Eigen::Quaterniond Qwl = lidarFrameList->back().Q;
+    lidarFrameList->back().P = Pwl;
+    lidarFrameList->back().Q = Qwl;
+
+    std::cout << "\n=============================================\n|         Initialization Successful         |"
+              << "\n=============================================\n"
+              << std::endl;
+    return true;
   }
 
   void RemoveLidarDistortion(CLOUD_PTR &laserCloud,
@@ -1399,6 +1878,7 @@ public:
   {
     if (kframeList.size() != 1)
       std::cout << "may error,only process one lidar frame" << std::endl;
+
     auto &kframe = kframeList.front();
     CLOUD_PTR surf(new CLOUD());
     for (const auto &p : kframe.laserCloud->points)
@@ -1438,20 +1918,20 @@ public:
 
     Eigen::Matrix4d pose = correct_transform.matrix().cast<double>() * curr_pose;
 
-    kframe.P = pose.topRightCorner(3, 1); //  update pose here
     kframe.Q = pose.block<3, 3>(0, 0);
+    kframe.P = pose.topRightCorner(3, 1); //  update pose here
 
     double tt = tc.toc();
     std::cout << "icp takes: " << tt << "ms" << std::endl;
     CLOUD_PTR output(new CLOUD);
 
-    // pcl::transformPointCloud(*kframe.laserCloud, *output, pose_in_map);
-    // sensor_msgs::PointCloud2 msg_target;
-    // // pcl::toROSMsg(*cloud_icp, msg_target);
-    // pcl::toROSMsg(*output, msg_target);
-    // msg_target.header.stamp = ros::Time::now();
-    // msg_target.header.frame_id = "world";
-    // pub_surf_.publish(msg_target);
+    pcl::transformPointCloud(*surf, *output, pose);
+    sensor_msgs::PointCloud2 msg_target;
+    // pcl::toROSMsg(*cloud_icp, msg_target);
+    pcl::toROSMsg(*output, msg_target);
+    msg_target.header.stamp = ros::Time::now();
+    msg_target.header.frame_id = "world";
+    pub_surf_.publish(msg_target);
 
     return true;
   }
@@ -1565,6 +2045,16 @@ public:
     ds_surf_.setInputCloud(globalSurfCloud);
     ds_surf_.filter(*map.globalSurfMapCloud_);
     return true;
+  }
+
+  void saveTrajectoryTUMformat(std::fstream &fout, std::string &stamp, Eigen::Vector3d &xyz, Eigen::Quaterniond &xyzw)
+  {
+    fout << stamp << " " << xyz[0] << " " << xyz[1] << " " << xyz[2] << " " << xyzw.x() << " " << xyzw.y() << " " << xyzw.z() << " " << xyzw.w() << std::endl;
+  }
+
+  void saveTrajectoryTUMformat(std::fstream &fout, std::string &stamp, double x, double y, double z, double qx, double qy, double qz, double qw)
+  {
+    fout << stamp << " " << x << " " << y << " " << z << " " << qx << " " << qy << " " << qz << " " << qw << std::endl;
   }
 };
 
