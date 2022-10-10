@@ -5,6 +5,10 @@
   <a href="https://github.com/chengwei0427/Lidar_IMU_Localization/issues"><img src="https://img.shields.io/github/issues/chengwei0427/Lidar_IMU_Localization"></img></a>
   <a href="https://github.com/chengwei0427/Lidar_IMU_Localization/graphs/contributors"><img src="https://img.shields.io/github/contributors/chengwei0427/Lidar_IMU_Localization?color=blue"></img></a>
 
+![Ubuntu](https://img.shields.io/badge/OS-Ubuntu-informational?style=flat&logo=ubuntu&logoColor=white&color=2bbc8a)
+![ROS](https://img.shields.io/badge/Tools-ROS-informational?style=flat&logo=ROS&logoColor=white&color=2bbc8a)
+![C++](https://img.shields.io/badge/Code-C++-informational?style=flat&logo=c%2B%2B&logoColor=white&color=2bbc8a)
+
 
 # Lidar-IMU-Localization
 
@@ -115,6 +119,7 @@ There are some parameters in params.yaml files:
   - [ ] Lio and Map constraint weight
   - [x] add test video
   - [x] add demo example
+  - [ ] add encoder
 
 
 ## Acknowledgements
