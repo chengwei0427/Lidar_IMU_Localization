@@ -127,3 +127,5 @@ There are some parameters in params.yaml files:
 Thanks for LOAM,[LIO_SAM](https://github.com/TixiaoShan/LIO-SAM) ,[LIO-Livox](https://github.com/Livox-SDK/LIO-Livox).
 
 ## Support
+
+![Star History Chart](https://api.star-history.com/svg?repos=chengwei0427/Lidar_IMU_Localization&type=Date)
